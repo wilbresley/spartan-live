@@ -1,0 +1,13 @@
+---
+description: Toda consulta neste projeto começa pelo índice do codegraph
+alwaysApply: true
+---
+
+# Codegraph primeiro
+
+Neste projeto, toda consulta — dúvida, bug, alteração ou revisão — começa pelo codegraph.
+
+- Chame `codegraph_explore` com `projectPath` `D:\Projetos\spartan-live` antes de procurar no código.
+- Use o fonte numerado que ele devolver. Não abra de novo um trecho que ele já mostrou.
+- Só use Grep ou Read se o índice não tiver o símbolo, o arquivo não estiver indexado, ou o trecho pedido não veio na resposta.
+- Não pule o codegraph porque uma busca direta parece mais rápida.

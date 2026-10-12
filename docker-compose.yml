@@ -1,0 +1,39 @@
+name: spartan-live
+
+services:
+  spartan-live-motor:
+    image: bluenviron/mediamtx:1.21.2
+    container_name: spartan-live-motor
+    restart: unless-stopped
+    ports:
+      - "1935:1935"
+    volumes:
+      - ./motor/mediamtx.yml:/mediamtx.yml:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  spartan-live-site:
+    build: ./site
+    image: spartan-live-site:latest
+    container_name: spartan-live-site
+    restart: unless-stopped
+    depends_on:
+      - spartan-live-motor
+    env_file:
+      - .env
+    ports:
+      - "8097:8080"
+    volumes:
+      - spartan-viewer:/app/data
+      - ./download:/app/download:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  spartan-viewer:

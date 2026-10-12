@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Spartan Live</title>
+  <link rel="icon" href="/spartan-live.png" type="image/png">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <section id="login-view" class="login-wrap hidden">
+    <form id="login-form" class="panel">
+      <img class="login-logo" src="/spartan-live.png" alt="Spartan Live">
+      <p class="muted login-hint">Entra pra ver as telas do grupo.</p>
+      <label>
+        Nome
+        <input name="user" autocomplete="username" required>
+      </label>
+      <label>
+        Senha
+        <input name="password" type="password" autocomplete="current-password" required>
+      </label>
+      <p id="login-error" class="error" role="alert"></p>
+      <button type="submit">Entrar</button>
+    </form>
+  </section>
+
+  <section id="password-view" class="login-wrap hidden">
+    <form id="password-form" class="panel">
+      <img class="login-logo" src="/spartan-live.png" alt="Spartan Live">
+      <h1>Nova senha</h1>
+      <p class="muted">Troca a senha antes de entrar. Se ela for esquecida, só reinstalando o projeto do zero.</p>
+      <label>Senha atual<input name="current" type="password" autocomplete="current-password" required></label>
+      <label>Nova senha<input name="next" type="password" autocomplete="new-password" minlength="8" required></label>
+      <label>Repete a nova senha<input name="again" type="password" autocomplete="new-password" minlength="8" required></label>
+      <p id="password-error" class="error" role="alert"></p>
+      <button type="submit">Trocar senha</button>
+    </form>
+  </section>
+
+  <section id="app-view" class="hidden">
+    <header>
+      <div class="brand">
+        <img class="brand-mark" src="/spartan-live.png" alt="">
+        <strong>Spartan Live</strong>
+        <span id="count" class="muted"></span>
+      </div>
+      <div class="header-actions">
+        <button id="grid-fullscreen" type="button" aria-label="Tela cheia do grid">⛶</button>
+        <button id="settings" type="button" aria-label="Ajustes">⚙</button>
+        <div id="settings-pop" class="settings-pop hidden">
+          <button id="chimes" type="button">Sons de entrada: ligados</button>
+          <form id="gear-password">
+            <strong>Trocar senha</strong>
+            <p class="muted">Se a senha for esquecida, só reinstalando o projeto do zero.</p>
+            <label>Senha atual<input name="current" type="password" autocomplete="current-password" required></label>
+            <label>Nova senha<input name="next" type="password" autocomplete="new-password" minlength="8" required></label>
+            <label>Repete a nova senha<input name="again" type="password" autocomplete="new-password" minlength="8" required></label>
+            <p id="gear-error" class="error" role="alert"></p>
+            <button type="submit">Trocar senha</button>
+          </form>
+          <button id="download" type="button">Download</button>
+          <p id="download-note" class="muted"></p>
+        </div>
+        <button id="logout" type="button">Sair</button>
+      </div>
+    </header>
+    <div id="workspace">
+      <aside id="rail-wrap">
+        <div class="rail-head">
+          <button id="rail-toggle" type="button" aria-expanded="false"><span class="rail-label">Lives</span><span class="rail-dot is-off"></span></button>
+          <span id="rail-count" class="rail-count" hidden>10s</span>
+        </div>
+        <p id="rail-joke" class="rail-joke">Cade a Live?</p>
+        <nav id="live-rail" class="hidden"></nav>
+      </aside>
+      <div id="stage">
+        <div id="hidden-lives"></div>
+        <p id="empty" class="empty hidden">Ninguém está transmitindo agora.</p>
+        <div id="video-container" class="hidden">
+          <button id="grid-exit" type="button" aria-label="Sair da tela cheia">✕</button>
+          <div id="peers"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <script src="/hls.min.js"></script>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

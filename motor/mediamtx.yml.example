@@ -1,0 +1,48 @@
+logLevel: info
+
+api: true
+apiAddress: :9997
+
+rtsp: false
+webrtc: false
+srt: false
+moq: false
+playback: false
+metrics: false
+pprof: false
+
+rtmp: true
+rtmpAddress: :1935
+
+hls: true
+hlsAddress: :8888
+hlsVariant: lowLatency
+hlsSegmentDuration: 1s
+hlsPartDuration: 200ms
+hlsSegmentCount: 120
+
+authMethod: internal
+authInternalUsers:
+  - user: any
+    pass:
+    ips: []
+    permissions: []
+
+  - user: publisher
+    pass: TROQUE_SENHA_PUBLISHER
+    ips: []
+    permissions:
+      - action: publish
+
+  - user: site
+    pass: TROQUE_SENHA_SITE
+    ips: []
+    permissions:
+      - action: read
+      - action: api
+
+pathDefaults:
+  overridePublisher: true
+
+paths:
+  all_others:

@@ -1,0 +1,11 @@
+.env
+motor/mediamtx.yml
+publisher/publish.json
+publisher/build/
+publisher/dist/
+publisher/ffmpeg/
+publisher/__pycache__/
+publisher/*.spec
+site/node_modules/
+site/data/
+download/

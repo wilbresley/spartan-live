@@ -1,0 +1,26 @@
+---
+description: Padrão ouro do som e da sincronia. Não alterar o caminho que o usuário confirmou.
+alwaysApply: true
+---
+
+# Padrão ouro — som e sincronia
+
+O usuário confirmou esta combinação: som limpo, live lisa e imagem sincronizada. Não mude estes pontos para encurtar o atraso, ganhar fluidez ou “corrigir” o sync.
+
+## Player (`site/public/app.js`, `attachStream`)
+
+- `maxLiveSyncPlaybackRate` fica em `1`. Acima de 1 o player acelera e a boca sai do lugar em poucos segundos. O botão **Ao vivo** só esconde isso.
+- `liveSyncDuration` fica em `1.5`.
+- `maxAudioFramesDrift` fica em `10`. O valor 1 corta o começo do AAC.
+
+## Som no programa (`publisher/spartan_live.py`)
+
+- Dois processos. A imagem (`gdigrab`) é codificada sozinha. O som entra depois pelo cano WAV. Este ffmpeg não tem wasapi nem ddagrab, e `-thread_queue_size` vale só no muxer. Não junte tela e som no mesmo processo. Não ponha `-thread_queue_size` antes de um `-i`.
+- O mixer continua soxr VHQ, soma em float, e um buraco é silêncio (`next_chunk`). Sem `aresample=async`. Sem repetir o bloco anterior.
+- `plan_audio` entrega na ordem da captura. Silêncio só quando falta um bloco inteiro. Acima de 200 ms, o excesso antigo sai. O escritor não lê o relógio da imagem para cortar ou calar o som.
+- O metrônomo é `perf_counter`, em blocos de 20 ms. Na conexão ficam os últimos 40 ms e dois blocos de abertura.
+- O mux copia o vídeo (`itsoffset` 0, AAC 256k, 48 kHz, estéreo, FLV). Sem PTS de relógio Unix no FLV. Sem `-fps_mode cfr` para alinhar o som. Sem `max_interleave_delta` curto.
+
+## Já quebrou, não volte
+
+PlaybackRate `1.05`. Escritor escravo do relógio do `gdigrab`, calando e cortando o som. Um ffmpeg só com tela e cano de áudio. CFR no vídeo para sincronizar.
