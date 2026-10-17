@@ -5,17 +5,26 @@ import { claimReturn, pruneReturns, rememberReturn } from "./quick-return.mjs";
 import { screenPhase } from "./screen-switch.mjs";
 import {
   HAPPY_GIFS,
+  MAX_SAVED_VOLUME_STEP,
+  MAX_VOLUME_STEP,
   SAD_GIFS,
+  capPlayStartVolume,
+  clampVolumeStep,
   createTheaterState,
+  createToastQueue,
+  dismissActiveToast,
+  enqueueArrivalToasts,
   pickNextGif,
   readPeerVolume,
   savePeerVolume,
+  shouldUseArrivalToast,
   theaterActive,
   theaterAfterEscape,
   theaterAfterMove,
   theaterAfterTick,
   theaterAfterToggle,
   theaterHeaderVisible,
+  tickToastQueue,
 } from "./theater.mjs";
 
 const loginView = document.querySelector("#login-view");
@@ -106,6 +115,77 @@ function persistVolumeMap(map) {
 let peerVolumes = loadVolumeMap();
 let hoveredPeer = null;
 let theaterState = createTheaterState();
+let toastState = createToastQueue();
+
+const arrivalToast = document.createElement("button");
+arrivalToast.type = "button";
+arrivalToast.className = "arrival-toast hidden";
+arrivalToast.setAttribute("aria-live", "polite");
+const arrivalToastDot = document.createElement("span");
+arrivalToastDot.className = "arrival-toast-dot";
+const arrivalToastText = document.createElement("span");
+arrivalToastText.className = "arrival-toast-text";
+arrivalToast.append(arrivalToastDot, arrivalToastText);
+if (appView) appView.append(arrivalToast);
+
+function syncToastMount() {
+  const host = document.fullscreenElement || appView || document.body;
+  if (host && arrivalToast.parentElement !== host) {
+    host.append(arrivalToast);
+  }
+}
+
+function paintArrivalToast() {
+  syncToastMount();
+  const active = toastState.active;
+  if (!active || appView?.classList.contains("hidden")) {
+    arrivalToast.classList.add("hidden");
+    arrivalToast.dataset.peer = "";
+    return;
+  }
+  arrivalToast.dataset.peer = active.name;
+  arrivalToastText.textContent = `${active.name} entrou online — clique para assistir`;
+  arrivalToast.classList.remove("hidden");
+}
+
+function openToastStream(name) {
+  if (!name || !catalog.has(name)) return;
+  const existing = peers.get(name);
+  if (existing) {
+    if (existing.hidden) {
+      existing.hidden = false;
+      existing.el.classList.remove("peer-hidden");
+    }
+    refreshGrid();
+    existing.resume?.();
+    return;
+  }
+  addStream({ name });
+  refreshGrid();
+  const created = peers.get(name);
+  created?.resume?.();
+}
+
+arrivalToast.addEventListener("click", (event) => {
+  event.stopPropagation();
+  const targetName = arrivalToast.dataset.peer || toastState.active?.name || "";
+  toastState = dismissActiveToast(toastState, Date.now());
+  paintArrivalToast();
+  if (targetName) openToastStream(targetName);
+});
+
+document.addEventListener("fullscreenchange", () => {
+  syncToastMount();
+});
+
+window.setInterval(() => {
+  if (!toastState.active && (!toastState.queue || toastState.queue.length === 0)) return;
+  const next = tickToastQueue(toastState, Date.now());
+  if (next !== toastState) {
+    toastState = next;
+    paintArrivalToast();
+  }
+}, 200);
 
 const peers = new Map();
 const catalog = new Map();
@@ -703,7 +783,7 @@ function addStream(stream) {
   track.setAttribute("role", "slider");
   track.setAttribute("aria-label", "Volume");
   track.setAttribute("aria-valuemin", "0");
-  track.setAttribute("aria-valuemax", "100");
+  track.setAttribute("aria-valuemax", String(MAX_VOLUME_STEP));
   track.setAttribute("aria-valuenow", "0");
   const fill = document.createElement("div");
   fill.className = "vol-fill";
@@ -712,6 +792,17 @@ function addStream(stream) {
   track.append(fill, thumb);
   pop.append(readout, track);
   volume.append(pop, volumeButton);
+  let hideVolTimer = 0;
+  volume.addEventListener("pointerenter", () => {
+    window.clearTimeout(hideVolTimer);
+    volume.classList.add("is-open");
+  });
+  volume.addEventListener("pointerleave", () => {
+    window.clearTimeout(hideVolTimer);
+    hideVolTimer = window.setTimeout(() => {
+      volume.classList.remove("is-open");
+    }, 220);
+  });
   const snap = document.createElement("button");
   snap.type = "button";
   snap.className = "icon-btn";
@@ -746,33 +837,79 @@ function addStream(stream) {
   }
   const initialVol = readPeerVolume(peerVolumes, stream.name);
   let savedVolume = initialVol.step || 100;
+  let currentVolumeStep = initialVol.muted ? 0 : savedVolume;
+  let boostGraph = null;
+  function ensureBoostGraph() {
+    if (boostGraph) {
+      if (boostGraph.ctx?.state === "suspended") {
+        boostGraph.ctx.resume().catch(() => {});
+      }
+      return boostGraph;
+    }
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return null;
+    try {
+      const ctx = ensureSound() || new Ctx();
+      if (ctx.state === "suspended") ctx.resume().catch(() => {});
+      const source = ctx.createMediaElementSource(video);
+      const gain = ctx.createGain();
+      gain.gain.value = 1;
+      source.connect(gain);
+      gain.connect(ctx.destination);
+      boostGraph = { ctx, source, gain };
+      return boostGraph;
+    } catch {
+      return null;
+    }
+  }
+  function syncGainNode(step) {
+    if (step > 100) {
+      const graph = ensureBoostGraph();
+      if (graph) graph.gain.gain.value = step / 100;
+    } else if (boostGraph) {
+      boostGraph.gain.gain.value = 1;
+    }
+  }
   function volumeStep() {
-    if (video.muted || video.volume === 0) return 0;
-    return Math.max(0, Math.min(100, Math.round(video.volume * 20) * 5));
+    if (video.muted || video.volume === 0 || currentVolumeStep === 0) return 0;
+    return clampVolumeStep(currentVolumeStep, MAX_VOLUME_STEP);
   }
   function paintSound() {
     const step = volumeStep();
-    fill.style.height = `${step}%`;
-    thumb.style.bottom = `${step}%`;
+    const ratio = Math.max(0, Math.min(100, (step / MAX_VOLUME_STEP) * 100));
+    fill.style.height = `${ratio}%`;
+    fill.classList.toggle("is-boost", step > 100);
+    thumb.style.bottom = `${ratio}%`;
     readout.textContent = `${step}%`;
     track.setAttribute("aria-valuenow", String(step));
     volumeButton.textContent = step === 0 ? "🔇" : "🔊";
   }
   function applyVolume(percent, remember = true) {
-    const step = Math.max(0, Math.min(100, Math.round(Number(percent) / 5) * 5));
+    const step = clampVolumeStep(percent, MAX_VOLUME_STEP);
+    currentVolumeStep = step;
     if (step > 0) savedVolume = step;
-    video.volume = (step > 0 ? step : savedVolume) / 100;
+    const activeStep = step > 0 ? step : savedVolume;
+    video.volume = Math.min(1, activeStep / 100);
     video.muted = step === 0;
+    syncGainNode(step);
     if (remember) {
-      peerVolumes = savePeerVolume(peerVolumes, stream.name, step > 0 ? step : savedVolume, step === 0);
+      peerVolumes = savePeerVolume(peerVolumes, stream.name, activeStep, step === 0);
       persistVolumeMap(peerVolumes);
     }
     paintSound();
   }
+  function enforceSafeStartVolume() {
+    if (savedVolume > MAX_SAVED_VOLUME_STEP) {
+      savedVolume = capPlayStartVolume(savedVolume, MAX_SAVED_VOLUME_STEP);
+    }
+    if (currentVolumeStep > MAX_SAVED_VOLUME_STEP) {
+      applyVolume(MAX_SAVED_VOLUME_STEP, true);
+    }
+  }
   function volumeFromPointer(event) {
     const rect = track.getBoundingClientRect();
     if (!rect.height) return;
-    applyVolume((1 - (event.clientY - rect.top) / rect.height) * 100);
+    applyVolume((1 - (event.clientY - rect.top) / rect.height) * MAX_VOLUME_STEP);
   }
   function paintPlay() {
     const paused = video.paused;
@@ -810,6 +947,7 @@ function addStream(stream) {
     if (!link) openLink();
   }
   function goLive() {
+    if (!peer.started) enforceSafeStartVolume();
     peer.started = true;
     peer.userPaused = false;
     peer.lastMove = Date.now();
@@ -835,6 +973,7 @@ function addStream(stream) {
     paintTime();
   }
   function resumePlayback() {
+    if (!peer.started) enforceSafeStartVolume();
     const held = pauseStarted ? (performance.now() - pauseStarted) / 1000 : 0;
     pauseStarted = 0;
     if (held >= 300) {
@@ -890,7 +1029,7 @@ function addStream(stream) {
     if (event.key === "ArrowUp" || event.key === "ArrowRight") applyVolume(current + 5);
     else if (event.key === "ArrowDown" || event.key === "ArrowLeft") applyVolume(current - 5);
     else if (event.key === "Home") applyVolume(0);
-    else if (event.key === "End") applyVolume(100);
+    else if (event.key === "End") applyVolume(MAX_VOLUME_STEP);
     else return;
     event.preventDefault();
   });
@@ -1271,7 +1410,21 @@ async function refresh() {
     }
     const newcomers = arrived.filter((name) => !resumed.has(name));
     if (newcomers.length) {
-      noteRailEnter(now);
+      const theaterOn = theaterActive(theaterState);
+      const fullscreenActive = Boolean(document.fullscreenElement);
+      const railRect = railWrap ? railWrap.getBoundingClientRect() : null;
+      const railCurrentlyVisible = Boolean(
+        !theaterOn &&
+        !fullscreenActive &&
+        visualRailOpen(railState, now) &&
+        (!railRect || railRect.width > 0)
+      );
+      if (shouldUseArrivalToast({ theaterOn, fullscreenActive, railVisible: railCurrentlyVisible })) {
+        toastState = enqueueArrivalToasts(toastState, newcomers, now);
+        paintArrivalToast();
+      } else {
+        noteRailEnter(now);
+      }
       if (visibleCount() === 0) advanceHappyGif();
     }
     if (railHadNames && catalog.size === 0) noteRailEmpty();

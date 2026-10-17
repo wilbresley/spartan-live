@@ -770,7 +770,7 @@ body.tab-hidden .live-led .led {
   display: none;
   position: absolute;
   left: 50%;
-  bottom: 40px;
+  bottom: 34px;
   z-index: 4;
   transform: translateX(-50%);
   flex-direction: column;
@@ -782,8 +782,18 @@ body.tab-hidden .live-led .led {
   background: rgba(20, 20, 20, 0.88);
 }
 
+.vol-pop::after {
+  content: "";
+  position: absolute;
+  left: -12px;
+  right: -12px;
+  top: 100%;
+  height: 16px;
+}
+
 .vol:hover .vol-pop,
-.vol:focus-within .vol-pop { display: flex; }
+.vol:focus-within .vol-pop,
+.vol.is-open .vol-pop { display: flex; }
 
 .vol-readout {
   min-width: 3.2em;
@@ -803,6 +813,17 @@ body.tab-hidden .live-led .led {
   touch-action: none;
 }
 
+.vol-track::before {
+  content: "";
+  position: absolute;
+  left: -3px;
+  right: -3px;
+  bottom: 50%;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.45);
+  pointer-events: none;
+}
+
 .vol-fill {
   position: absolute;
   left: 0;
@@ -812,6 +833,10 @@ body.tab-hidden .live-led .led {
   border-radius: inherit;
   background: var(--accent);
   pointer-events: none;
+}
+
+.vol-fill.is-boost {
+  background: linear-gradient(180deg, #ff7a45 0%, var(--accent) 55%);
 }
 
 .vol-thumb {
@@ -947,3 +972,50 @@ body.tab-hidden .live-led .led {
   border: 0;
   border-radius: 0;
 }
+
+.arrival-toast {
+  position: fixed;
+  top: 14px;
+  left: 14px;
+  z-index: 60;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(360px, calc(100vw - 28px));
+  padding: 9px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  background: rgba(18, 18, 18, 0.92);
+  color: #f3f3f3;
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(8px);
+  cursor: pointer;
+  transition: opacity 0.18s ease, transform 0.18s ease, border-color 0.15s ease;
+}
+
+.arrival-toast:hover {
+  border-color: var(--accent);
+  background: rgba(26, 26, 26, 0.96);
+}
+
+.arrival-toast.hidden {
+  display: none !important;
+}
+
+.arrival-toast-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #35d06a;
+  box-shadow: 0 0 8px rgba(53, 208, 106, 0.75);
+  flex: 0 0 auto;
+}
+
+.arrival-toast-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+

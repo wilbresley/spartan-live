@@ -57,14 +57,32 @@ export function theaterHeaderVisible(state) {
   return false;
 }
 
+export const MAX_VOLUME_STEP = 200;
+export const MAX_SAVED_VOLUME_STEP = 100;
+export const TOAST_DURATION_MS = 3000;
+
+export function clampVolumeStep(percent, maxStep = MAX_VOLUME_STEP) {
+  const num = Number(percent);
+  if (!Number.isFinite(num)) return 0;
+  return Math.max(0, Math.min(maxStep, Math.round(num / 5) * 5));
+}
+
+export function capPlayStartVolume(step, maxSafe = MAX_SAVED_VOLUME_STEP) {
+  const clean = clampVolumeStep(step, MAX_VOLUME_STEP);
+  if (clean <= 0) return maxSafe;
+  return Math.min(maxSafe, clean);
+}
+
 export function savePeerVolume(map, name, step, muted) {
   if (!name) return map || {};
-  const clean = Math.max(0, Math.min(100, Math.round(Number(step) / 5) * 5));
+  const raw = clampVolumeStep(step, MAX_VOLUME_STEP);
+  const safeStep = Math.min(MAX_SAVED_VOLUME_STEP, raw);
+  const fallback = Math.min(MAX_SAVED_VOLUME_STEP, Number(map?.[name]?.step) || MAX_SAVED_VOLUME_STEP);
   return {
     ...(map || {}),
     [name]: {
-      step: clean > 0 ? clean : Number(map?.[name]?.step) || 100,
-      muted: Boolean(muted) || clean === 0,
+      step: safeStep > 0 ? safeStep : fallback,
+      muted: Boolean(muted) || raw === 0,
     },
   };
 }
@@ -72,10 +90,69 @@ export function savePeerVolume(map, name, step, muted) {
 export function readPeerVolume(map, name) {
   const entry = map?.[name];
   if (!entry) return { step: 100, muted: true };
-  const step = Math.max(5, Math.min(100, Math.round((Number(entry.step) || 100) / 5) * 5));
+  const step = Math.max(5, Math.min(MAX_SAVED_VOLUME_STEP, Math.round((Number(entry.step) || 100) / 5) * 5));
   return {
     step,
     muted: entry.muted !== false,
+  };
+}
+
+export function shouldUseArrivalToast({ theaterOn = false, fullscreenActive = false, railVisible = true } = {}) {
+  if (fullscreenActive || theaterOn) return true;
+  return !railVisible;
+}
+
+export function createToastQueue() {
+  return {
+    active: null,
+    queue: [],
+  };
+}
+
+export function enqueueArrivalToasts(state, names, now = 0, durationMs = TOAST_DURATION_MS) {
+  const current = {
+    active: state?.active ? { ...state.active } : null,
+    queue: Array.isArray(state?.queue) ? [...state.queue] : [],
+  };
+  for (const raw of names || []) {
+    const name = String(raw || "").trim();
+    if (!name) continue;
+    if (current.active?.name === name || current.queue.includes(name)) continue;
+    current.queue.push(name);
+  }
+  if (!current.active && current.queue.length > 0) {
+    const nextName = current.queue.shift();
+    current.active = { name: nextName, until: now + durationMs };
+  }
+  return current;
+}
+
+export function tickToastQueue(state, now = 0, durationMs = TOAST_DURATION_MS) {
+  if (!state?.active) {
+    if (!state?.queue?.length) return state || createToastQueue();
+    return enqueueArrivalToasts(state, [], now, durationMs);
+  }
+  if (now < state.active.until) return state;
+  const queue = Array.isArray(state.queue) ? [...state.queue] : [];
+  if (queue.length === 0) {
+    return { active: null, queue: [] };
+  }
+  const nextName = queue.shift();
+  return {
+    active: { name: nextName, until: now + durationMs },
+    queue,
+  };
+}
+
+export function dismissActiveToast(state, now = 0, durationMs = TOAST_DURATION_MS) {
+  const queue = Array.isArray(state?.queue) ? [...state.queue] : [];
+  if (queue.length === 0) {
+    return { active: null, queue: [] };
+  }
+  const nextName = queue.shift();
+  return {
+    active: { name: nextName, until: now + durationMs },
+    queue,
   };
 }
 

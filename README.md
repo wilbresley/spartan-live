@@ -92,7 +92,7 @@ O site entrega só esse arquivo, e só com sessão.
 
 O programa pede apelido, servidor, tela ou janela/jogo, som do PC, microfone e a qualidade. O padrão é 1080p 60. A janela é Qt 6 (PySide6), sem a barra do Windows, e abre em 560×720 no centro do monitor principal. Arrastar a faixa de cima move a janela. As bordas e os cantos redimensionam pelo próprio Windows. O botão maximizar guarda o tamanho anterior.
 
-O seletor **Tela** lista os monitores (`Tela 1 — ...`) e também todas as janelas e jogos abertos (`Janela: Título (jogo.exe)`), atualizando a lista ao abrir o menu ou pelo botão **↻ Atualizar**. Na captura de janela/jogo, o programa usa *Windows Graphics Capture* com `IsBorderRequired = False` quando o sistema suporta, ou `PrintWindow` (`PW_RENDERFULLCONTENT`) com desenho do ponteiro real, garantindo captura **sem borda amarela** no Windows 10 e no Windows 11 e sem expor outras telas no `Alt+Tab`.
+O seletor **Tela** abre um painel visual com **miniaturas ao vivo** separadas em duas seções — **Telas** (`Tela 1 — ...`) e **Janelas e Programas** (`Janela: Título (jogo.exe)`) — com campo de busca no topo para filtrar pelo nome ou executável e botão **↻ Atualizar**. Na captura de janela/jogo, o programa usa *Windows Graphics Capture* com `IsBorderRequired = False` quando o sistema suporta, ou `PrintWindow` (`PW_RENDERFULLCONTENT`) com desenho do ponteiro real, garantindo captura **sem borda amarela** no Windows 10 e no Windows 11 e sem expor outras telas no `Alt+Tab`.
 
 No **Som do PC**, além do alto-falante inteiro, há a opção **Som da janela / jogo selecionado**, que usa *WASAPI Application Loopback* (`ActivateAudioInterfaceAsync` com `VAD\Process_Loopback` por `PID`) para capturar apenas o áudio daquela janela ou jogo (isolando chamadas do WhatsApp, Discord ou navegador). Ao escolher uma janela no menu **Tela**, o **Som do PC** muda sozinho para **Som da janela / jogo selecionado**; ao voltar para um monitor, ele restaura o alto-falante anterior.
 
@@ -157,13 +157,13 @@ A lista começa fechada. A escolha fica no navegador. Com a lista fechada, uma l
 
 Sem ninguém ao vivo, a área mostra um GIF triste, um de cada vez, entre os 12 de `site/public/gifs/sad-1.gif` a `sad-12.gif`. Quando entra uma live e a grade ainda está vazia, passa para um GIF feliz, entre os 12 de `happy-1.gif` a `happy-12.gif`. O navegador lembra o ponto da roleta.
 
-O botão de modo teatro, ou a tecla T, esconde o topo na hora. Com uma live tocando e o mouse parado por 30 segundos, o teatro entra sozinho. No teatro manual, encostar no topo mostra a faixa. Esc sai do teatro. O volume de cada apelido fica no navegador. O quadro mostra quantas pessoas estão assistindo. Picture-in-picture fica no controle do player.
+O botão de modo teatro, ou a tecla T, esconde o topo na hora. Com uma live tocando e o mouse parado por 30 segundos, o teatro entra sozinho. No teatro manual, encostar no topo mostra a faixa. Esc sai do teatro. Quando entra uma live nova com a lista lateral oculta (modo teatro manual ou automático, tela cheia da grade ou tela cheia de um player), aparece um balão de notificação no canto superior esquerdo por 3 segundos (em fila, um por vez sem encavalar), e clicar no balão já abre e inicia a live da pessoa. O volume de cada apelido fica no navegador. O quadro mostra quantas pessoas estão assistindo. Picture-in-picture fica no controle do player.
 
 Um apelido na lista coloca o quadro parado. O vídeo só baixa no play. Clicar de novo no apelido, ou no X do quadro, remove o player. O X não encerra a transmissão.
 
 Uma live ocupa a área. Duas ou mais ficam em duas colunas iguais, com a imagem inteira no quadro. Clicar no quadro amplia. Clicar de novo, ou Esc, volta à grade. A grade e cada quadro têm tela cheia.
 
-A reprodução começa muda. O volume vai de 0 a 100, de 5 em 5. Mutar guarda o último nível.
+A reprodução começa muda. O volume vai de 0% a 200%, de 5 em 5 (acima de 100% amplifica via `GainNode` da Web Audio API). Mutar guarda o último nível. No navegador, o volume salvo por apelido fica limitado a no máximo 100%, e ao iniciar o play o volume nunca passa de 100% para proteger quem usa fone de ouvido.
 
 **Ao vivo** pula para a ponta. Fica verde com atraso de até 7 segundos e vermelho acima disso. Quem está tocando e passa de 90 segundos atrás volta para a ponta. Uma pausa de 5 minutos ou mais também recomece na ponta.
 

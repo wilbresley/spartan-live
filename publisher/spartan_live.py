@@ -17,7 +17,7 @@ import winreg
 from urllib.parse import quote
 
 from PySide6.QtCore import Qt, QTimer, QRectF, QPoint, QEvent, QObject, QSize, Signal
-from PySide6.QtGui import QPainter, QColor, QPen, QFont, QFontMetrics, QPainterPath, QIcon, QCursor
+from PySide6.QtGui import QPainter, QColor, QPen, QFont, QFontMetrics, QPainterPath, QIcon, QCursor, QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QCheckBox, QScrollArea, QFrame, QMessageBox,
@@ -730,6 +730,132 @@ def list_windows(own_pid=None):
     except Exception:
         pass
     return found
+
+
+def split_and_filter_targets(targets, query=""):
+    """Separa alvos em Telas (monitores) e Janelas/Programas, filtrando por título, exe ou rótulo."""
+    needle = " ".join(str(query or "").strip().lower().split())
+    screens = []
+    windows = []
+    for idx, item in enumerate(targets or []):
+        label = monitor_label(idx, item)
+        title = str(item.get("title") or "").strip()
+        exe = str(item.get("exe") or "").strip()
+        is_win = item.get("kind") == "window"
+        if needle:
+            haystack = f"{label} {title} {exe}".lower()
+            if needle not in haystack:
+                continue
+        entry = {
+            "index": idx,
+            "label": label,
+            "target": item,
+            "kind": "window" if is_win else "screen",
+            "title": title if is_win else label,
+            "subtitle": exe if is_win else f"{int(item.get('width', 1920))}×{int(item.get('height', 1080))}",
+        }
+        if is_win:
+            windows.append(entry)
+        else:
+            screens.append(entry)
+    return {"screens": screens, "windows": windows}
+
+
+def capture_target_preview_bgra(target, thumb_w=208, thumb_h=117):
+    """Captura uma miniatura BGRA rápida em memória de um monitor ou janela/jogo."""
+    tw = max(16, int(thumb_w) & ~1)
+    th = max(16, int(thumb_h) & ~1)
+    total = tw * th * 4
+    try:
+        user32 = ctypes.windll.user32
+        gdi32 = ctypes.windll.gdi32
+    except Exception:
+        return tw, th, bytes(total)
+
+    class RECT(ctypes.Structure):
+        _fields_ = [
+            ("left", ctypes.c_long),
+            ("top", ctypes.c_long),
+            ("right", ctypes.c_long),
+            ("bottom", ctypes.c_long),
+        ]
+
+    screen_dc = user32.GetDC(None)
+    if not screen_dc:
+        return tw, th, bytes(total)
+    dst_dc = gdi32.CreateCompatibleDC(screen_dc)
+    bmi = _BITMAPINFOHEADER()
+    bmi.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+    bmi.biWidth = tw
+    bmi.biHeight = -th
+    bmi.biPlanes = 1
+    bmi.biBitCount = 32
+    bmi.biCompression = 0
+    dst_bits = ctypes.c_void_p()
+    dst_bmp = gdi32.CreateDIBSection(screen_dc, ctypes.byref(bmi), 0, ctypes.byref(dst_bits), None, 0)
+    old_dst = gdi32.SelectObject(dst_dc, dst_bmp) if dst_bmp else None
+    gdi32.SetStretchBltMode(dst_dc, 3)
+
+    src_dc = None
+    src_bmp = None
+    old_src = None
+    try:
+        if not dst_bits.value:
+            return tw, th, bytes(total)
+        ctypes.memset(dst_bits.value, 18, total)
+        if isinstance(target, dict) and target.get("kind") == "window":
+            hwnd = int(target.get("hwnd") or 0)
+            if hwnd and user32.IsWindow(hwnd) and not user32.IsIconic(hwnd):
+                crect = RECT()
+                user32.GetClientRect(hwnd, ctypes.byref(crect))
+                cw = int(crect.right - crect.left)
+                ch = int(crect.bottom - crect.top)
+                flags = 3
+                if cw <= 8 or ch <= 8:
+                    wrect = RECT()
+                    user32.GetWindowRect(hwnd, ctypes.byref(wrect))
+                    cw = int(wrect.right - wrect.left)
+                    ch = int(wrect.bottom - wrect.top)
+                    flags = 2
+                if cw > 8 and ch > 8:
+                    src_dc = gdi32.CreateCompatibleDC(screen_dc)
+                    src_bmp = gdi32.CreateCompatibleBitmap(screen_dc, cw, ch)
+                    old_src = gdi32.SelectObject(src_dc, src_bmp)
+                    if user32.PrintWindow(hwnd, src_dc, flags):
+                        ox, oy, fw, fh = fit_aspect_box(cw, ch, tw, th)
+                        gdi32.StretchBlt(dst_dc, ox, oy, fw, fh, src_dc, 0, 0, cw, ch, 0x00CC0020)
+        elif isinstance(target, dict):
+            left = int(target.get("left", 0))
+            top = int(target.get("top", 0))
+            mw = max(16, int(target.get("width", 1920)))
+            mh = max(16, int(target.get("height", 1080)))
+            ox, oy, fw, fh = fit_aspect_box(mw, mh, tw, th)
+            gdi32.StretchBlt(dst_dc, ox, oy, fw, fh, screen_dc, left, top, mw, mh, 0x00CC0020)
+        raw = bytearray(ctypes.string_at(dst_bits.value, total))
+        raw[3::4] = b"\xff" * (tw * th)
+        return tw, th, bytes(raw)
+    except Exception:
+        return tw, th, bytes(total)
+    finally:
+        if old_src and src_dc:
+            gdi32.SelectObject(src_dc, old_src)
+        if src_bmp:
+            gdi32.DeleteObject(src_bmp)
+        if src_dc:
+            gdi32.DeleteDC(src_dc)
+        if old_dst and dst_dc:
+            gdi32.SelectObject(dst_dc, old_dst)
+        if dst_bmp:
+            gdi32.DeleteObject(dst_bmp)
+        if dst_dc:
+            gdi32.DeleteDC(dst_dc)
+        user32.ReleaseDC(None, screen_dc)
+
+
+def preview_pixmap_for_target(target, thumb_w=208, thumb_h=117):
+    tw, th, raw = capture_target_preview_bgra(target, thumb_w, thumb_h)
+    img = QImage(raw, tw, th, tw * 4, QImage.Format.Format_ARGB32).copy()
+    return QPixmap.fromImage(img)
 
 
 QUALITY_OPTIONS = (
@@ -2370,10 +2496,267 @@ class _ChoicePopup(QFrame):
             self.owner.popup = None
 
 
+class _TargetCard(QFrame):
+    """Cartão visual com miniatura ao vivo de uma tela ou janela/jogo."""
+
+    def __init__(self, parent, entry, pixmap, selected, field, fg, muted, accent, on_pick):
+        super().__init__(parent)
+        self.entry = entry
+        self.selected = bool(selected)
+        self.field = field
+        self.fg = fg
+        self.muted = muted
+        self.accent = accent
+        self.on_pick = on_pick
+        self.hovered = False
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedSize(224, 172)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(7, 7, 7, 7)
+        layout.setSpacing(4)
+
+        self.thumb_lbl = QLabel(self)
+        self.thumb_lbl.setFixedSize(208, 117)
+        self.thumb_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.thumb_lbl.setStyleSheet("background-color: #101010; border-radius: 6px; border: 1px solid #2a2a2a;")
+        if pixmap is not None and not pixmap.isNull():
+            self.thumb_lbl.setPixmap(pixmap)
+        layout.addWidget(self.thumb_lbl, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        title_font = QFont("Segoe UI", 9, QFont.Weight.Bold)
+        fm_title = QFontMetrics(title_font)
+        shown_title = fm_title.elidedText(str(entry.get("title") or ""), Qt.TextElideMode.ElideRight, 204)
+        self.title_lbl = QLabel(shown_title, self)
+        self.title_lbl.setFont(title_font)
+        self.title_lbl.setStyleSheet(f"color: {fg}; background: transparent; border: none;")
+        layout.addWidget(self.title_lbl)
+
+        sub_font = QFont("Segoe UI", 8)
+        fm_sub = QFontMetrics(sub_font)
+        shown_sub = fm_sub.elidedText(str(entry.get("subtitle") or ""), Qt.TextElideMode.ElideRight, 204)
+        self.sub_lbl = QLabel(shown_sub, self)
+        self.sub_lbl.setFont(sub_font)
+        self.sub_lbl.setStyleSheet(f"color: {muted}; background: transparent; border: none;")
+        layout.addWidget(self.sub_lbl)
+        self._apply_style()
+
+    def _apply_style(self):
+        border = self.accent if (self.selected or self.hovered) else "#343434"
+        bg = "#251c1c" if self.selected else ("#262626" if self.hovered else self.field)
+        bw = 2 if (self.selected or self.hovered) else 1
+        self.setStyleSheet(
+            f"_TargetCard {{ background-color: {bg}; border: {bw}px solid {border}; border-radius: 10px; }}"
+        )
+
+    def enterEvent(self, event):
+        self.hovered = True
+        self._apply_style()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.hovered = False
+        self._apply_style()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.on_pick(self.entry["label"])
+            event.accept()
+
+
+class _TargetPickerPopup(QFrame):
+    """Painel visual com miniaturas de Telas e Janelas/Programas e campo de busca."""
+
+    def __init__(self, owner, targets_provider, refresh_fn, bg, field, fg, muted, accent, line):
+        super().__init__(None, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint)
+        self.owner = owner
+        self.targets_provider = targets_provider
+        self.refresh_fn = refresh_fn
+        self.bg = bg
+        self.field = field
+        self.fg = fg
+        self.muted = muted
+        self.accent = accent
+        self.line = line
+        self._thumb_cache = {}
+        self.cards = []
+        self.setFixedSize(500, 480)
+        self.setStyleSheet(
+            f"_TargetPickerPopup {{ background-color: {bg}; border: 1px solid {line}; border-radius: 12px; }}"
+            f"QScrollArea {{ background: transparent; border: none; }}"
+        )
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 10, 12, 10)
+        root.setSpacing(8)
+
+        top = QWidget(self)
+        top.setStyleSheet("background: transparent; border: none;")
+        top_row = QHBoxLayout(top)
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(6)
+
+        self.search_input = QLineEdit(top)
+        self.search_input.setPlaceholderText("Buscar tela, janela ou jogo...")
+        self.search_input.setFont(QFont("Segoe UI", 10))
+        self.search_input.setFixedHeight(32)
+        self.search_input.setStyleSheet(
+            f"""
+            QLineEdit {{
+                background-color: {field}; color: {fg};
+                border: 1px solid {line}; border-radius: 8px; padding: 2px 10px;
+            }}
+            QLineEdit:focus {{ border: 1px solid {accent}; }}
+            """
+        )
+        self.search_input.textChanged.connect(lambda _txt: self.rebuild_cards(refresh_thumbs=False))
+        top_row.addWidget(self.search_input, 1)
+
+        self.refresh_btn = _MiniTagButton(top, "↻ Atualizar", "#252525", fg, accent, self._on_manual_refresh)
+        self.refresh_btn.setFixedHeight(30)
+        top_row.addWidget(self.refresh_btn)
+
+        close_btn = _MiniTagButton(top, "✕", "#252525", fg, accent, self.close)
+        close_btn.setFixedHeight(30)
+        top_row.addWidget(close_btn)
+        root.addWidget(top)
+
+        self.scroll = QScrollArea(self)
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setStyleSheet(
+            f"""
+            QScrollArea {{ background: {bg}; border: none; }}
+            QScrollBar:vertical {{
+                background: {bg}; width: 10px; margin: 2px; border-radius: 4px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: #3b3b3b; min-height: 24px; border-radius: 4px;
+            }}
+            QScrollBar::handle:vertical:hover {{ background: #525252; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; width: 0px; }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none; }}
+            """
+        )
+        self.inner = QWidget()
+        self.inner.setStyleSheet(f"background-color: {bg}; border: none;")
+        self.inner_layout = QVBoxLayout(self.inner)
+        self.inner_layout.setContentsMargins(2, 2, 2, 6)
+        self.inner_layout.setSpacing(8)
+        self.scroll.setWidget(self.inner)
+        root.addWidget(self.scroll, 1)
+
+        self.rebuild_cards(refresh_thumbs=True)
+
+    def _on_manual_refresh(self):
+        if callable(self.refresh_fn):
+            try:
+                self.refresh_fn()
+            except Exception:
+                pass
+        self.rebuild_cards(refresh_thumbs=True)
+
+    def _cache_key(self, target):
+        if isinstance(target, dict) and target.get("kind") == "window":
+            return f"win:{int(target.get('hwnd') or 0)}"
+        if isinstance(target, dict):
+            return f"mon:{int(target.get('output', 0))}:{int(target.get('left', 0))}:{int(target.get('top', 0))}"
+        return str(id(target))
+
+    def _get_pixmap(self, target, refresh=False):
+        key = self._cache_key(target)
+        if not refresh and key in self._thumb_cache:
+            return self._thumb_cache[key]
+        pix = preview_pixmap_for_target(target, 208, 117)
+        self._thumb_cache[key] = pix
+        return pix
+
+    def _clear_inner(self):
+        self.cards = []
+        while self.inner_layout.count():
+            item = self.inner_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+    def _add_section(self, heading, entries, current_label, refresh_thumbs):
+        if not entries:
+            return
+        hdr = QLabel(heading, self.inner)
+        hdr.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        hdr.setStyleSheet(f"color: {self.muted}; background: transparent; border: none; padding: 2px 2px 0 2px;")
+        self.inner_layout.addWidget(hdr)
+
+        grid_host = QWidget(self.inner)
+        grid_host.setStyleSheet("background: transparent; border: none;")
+        grid = QGridLayout(grid_host)
+        grid.setContentsMargins(0, 0, 0, 4)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+
+        for idx, entry in enumerate(entries):
+            pix = self._get_pixmap(entry["target"], refresh=refresh_thumbs)
+            card = _TargetCard(
+                grid_host,
+                entry,
+                pix,
+                entry["label"] == current_label,
+                self.field,
+                self.fg,
+                self.muted,
+                self.accent,
+                self.owner.pick,
+            )
+            self.cards.append(card)
+            grid.addWidget(card, idx // 2, idx % 2, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        self.inner_layout.addWidget(grid_host)
+
+    def rebuild_cards(self, refresh_thumbs=False):
+        if refresh_thumbs:
+            self._thumb_cache.clear()
+        self._clear_inner()
+        targets = self.targets_provider() if callable(self.targets_provider) else []
+        query = self.search_input.text() if hasattr(self, "search_input") else ""
+        grouped = split_and_filter_targets(targets, query)
+        current_label = self.owner.variable.get()
+
+        self._add_section(f"Telas ({len(grouped['screens'])})", grouped["screens"], current_label, refresh_thumbs)
+        self._add_section(
+            f"Janelas e Programas ({len(grouped['windows'])})",
+            grouped["windows"],
+            current_label,
+            refresh_thumbs,
+        )
+
+        if not grouped["screens"] and not grouped["windows"]:
+            empty = QLabel("Nenhuma tela ou janela encontrada para essa busca.", self.inner)
+            empty.setFont(QFont("Segoe UI", 10))
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty.setStyleSheet(f"color: {self.muted}; padding: 28px 12px; background: transparent; border: none;")
+            self.inner_layout.addWidget(empty)
+
+        self.inner_layout.addStretch(1)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        try:
+            self.search_input.setFocus(Qt.FocusReason.PopupFocusReason)
+        except Exception:
+            pass
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        if self.owner.popup is self:
+            self.owner.popup = None
+
+
 class Choice(QWidget):
     """Lista escura com canto arredondado e anti-aliasing nativo Qt."""
 
-    def __init__(self, master, variable, labels, bg, field, fg, accent, before_open=None):
+    def __init__(self, master, variable, labels, bg, field, fg, accent, before_open=None, targets_provider=None, refresh_cmd=None):
         _ensure_qt_app()
         super().__init__(master if isinstance(master, QWidget) else None)
         self.variable = variable
@@ -2384,6 +2767,8 @@ class Choice(QWidget):
         self.accent = accent
         self.line = "#343434"
         self.before_open = before_open
+        self.targets_provider = targets_provider
+        self.refresh_cmd = refresh_cmd
         self.popup = None
         self.canvas = self
         self.setFixedHeight(44)
@@ -2466,6 +2851,32 @@ class Choice(QWidget):
             except Exception:
                 pass
         self.close_menu()
+        if callable(self.targets_provider):
+            popup = _TargetPickerPopup(
+                self,
+                self.targets_provider,
+                self.refresh_cmd,
+                self.bg,
+                self.field,
+                self.fg,
+                "#9a9a9a",
+                self.accent,
+                self.line,
+            )
+            global_pos = self.mapToGlobal(QPoint(0, self.height() + 4))
+            screen = QApplication.screenAt(global_pos) or QApplication.primaryScreen()
+            if screen is not None:
+                avail = screen.availableGeometry()
+                px = max(avail.left() + 8, min(global_pos.x(), avail.right() - popup.width() - 8))
+                py = global_pos.y()
+                if py + popup.height() > avail.bottom() - 8:
+                    above = self.mapToGlobal(QPoint(0, -popup.height() - 4)).y()
+                    py = above if above >= avail.top() + 8 else max(avail.top() + 8, avail.bottom() - popup.height() - 8)
+                global_pos = QPoint(px, py)
+            popup.move(global_pos)
+            self.popup = popup
+            popup.show()
+            return
         w = max(self.width(), 220)
         row = 36
         h = min(320, 12 + row * len(self.labels))
@@ -3779,7 +4190,14 @@ class App(QWidget):
         if saved >= len(self.monitor_labels):
             saved = 0
         self.monitor_choice = _QtVar(self.monitor_labels[saved])
-        self._choice("Tela", self.monitor_choice, self.monitor_labels, before_open=self.refresh_targets, refresh_cmd=self.refresh_targets)
+        self._choice(
+            "Tela",
+            self.monitor_choice,
+            self.monitor_labels,
+            before_open=self.refresh_targets,
+            refresh_cmd=self.refresh_targets,
+            targets_provider=lambda: self.monitors,
+        )
         self.monitor_choice.trace_add("write", lambda *_args: self._screen_changed())
 
         self.pc_devices = []
@@ -3958,7 +4376,7 @@ class App(QWidget):
         vbox.addWidget(entry)
         self._content_layout.addWidget(box)
 
-    def _choice(self, label, variable, labels, volume_var=None, volume_cmd=None, before_open=None, refresh_cmd=None):
+    def _choice(self, label, variable, labels, volume_var=None, volume_cmd=None, before_open=None, refresh_cmd=None, targets_provider=None):
         box = QWidget(self.content)
         vbox = QVBoxLayout(box)
         vbox.setContentsMargins(0, 0, 0, 0)
@@ -3980,7 +4398,18 @@ class App(QWidget):
             pill = VolumePill(head, volume_var, volume_cmd, self.bg, self.field, self.muted, self.accent)
             hbox.addWidget(pill)
         vbox.addWidget(head)
-        ch = Choice(box, variable, labels, self.bg, self.field, self.fg, self.accent, before_open=before_open)
+        ch = Choice(
+            box,
+            variable,
+            labels,
+            self.bg,
+            self.field,
+            self.fg,
+            self.accent,
+            before_open=before_open,
+            targets_provider=targets_provider,
+            refresh_cmd=refresh_cmd,
+        )
         if refresh_cmd is not None:
             self.monitor_choice_widget = ch
         vbox.addWidget(ch)

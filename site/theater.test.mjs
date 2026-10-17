@@ -3,19 +3,29 @@ import test from "node:test";
 
 import {
   HAPPY_GIFS,
+  MAX_SAVED_VOLUME_STEP,
+  MAX_VOLUME_STEP,
   SAD_GIFS,
+  TOAST_DURATION_MS,
+  capPlayStartVolume,
+  clampVolumeStep,
   countViewers,
   createTheaterState,
+  createToastQueue,
+  dismissActiveToast,
   dropViewer,
+  enqueueArrivalToasts,
   pickNextGif,
   readPeerVolume,
   savePeerVolume,
+  shouldUseArrivalToast,
   theaterActive,
   theaterAfterEscape,
   theaterAfterMove,
   theaterAfterTick,
   theaterAfterToggle,
   theaterHeaderVisible,
+  tickToastQueue,
   touchViewer,
 } from "./public/theater.mjs";
 
@@ -62,6 +72,50 @@ test("volume salvo por amigo lembra o nível de cada apelido separadamente", () 
 
   memory = savePeerVolume(memory, "Joao", 0, true);
   assert.deepEqual(readPeerVolume(memory, "Joao"), { step: 35, muted: true });
+});
+
+test("volume permite boost até 200% mas salva no máximo 100% e inicia live em até 100%", () => {
+  assert.equal(MAX_VOLUME_STEP, 200);
+  assert.equal(MAX_SAVED_VOLUME_STEP, 100);
+  assert.equal(clampVolumeStep(175), 175);
+  assert.equal(clampVolumeStep(250), 200);
+  assert.equal(capPlayStartVolume(180), 100);
+  assert.equal(capPlayStartVolume(65), 65);
+
+  let memory = {};
+  memory = savePeerVolume(memory, "Bresley", 185, false);
+  assert.deepEqual(readPeerVolume(memory, "Bresley"), { step: 100, muted: false });
+
+  const tampered = { Bresley: { step: 200, muted: false } };
+  assert.deepEqual(readPeerVolume(tampered, "Bresley"), { step: 100, muted: false });
+});
+
+test("balão de chegada entra em fila de 3s sem encavalar quando teatro ou tela cheia esconde a lista", () => {
+  assert.equal(TOAST_DURATION_MS, 3000);
+  assert.equal(shouldUseArrivalToast({ theaterOn: true, fullscreenActive: false, railVisible: false }), true);
+  assert.equal(shouldUseArrivalToast({ theaterOn: false, fullscreenActive: true, railVisible: false }), true);
+  assert.equal(shouldUseArrivalToast({ theaterOn: false, fullscreenActive: false, railVisible: false }), true);
+  assert.equal(shouldUseArrivalToast({ theaterOn: false, fullscreenActive: false, railVisible: true }), false);
+
+  let queue = createToastQueue();
+  queue = enqueueArrivalToasts(queue, ["Bresley", "Joao", "Pedro"], 1000, 3000);
+  assert.deepEqual(queue.active, { name: "Bresley", until: 4000 });
+  assert.deepEqual(queue.queue, ["Joao", "Pedro"]);
+
+  queue = tickToastQueue(queue, 2500, 3000);
+  assert.equal(queue.active.name, "Bresley");
+
+  queue = tickToastQueue(queue, 4000, 3000);
+  assert.deepEqual(queue.active, { name: "Joao", until: 7000 });
+  assert.deepEqual(queue.queue, ["Pedro"]);
+
+  queue = dismissActiveToast(queue, 5000, 3000);
+  assert.deepEqual(queue.active, { name: "Pedro", until: 8000 });
+  assert.deepEqual(queue.queue, []);
+
+  queue = tickToastQueue(queue, 8000, 3000);
+  assert.equal(queue.active, null);
+  assert.deepEqual(queue.queue, []);
 });
 
 test("contador de espectadores soma quem está assistindo, remove na hora ao pausar/sair e expira quem saiu", () => {

@@ -866,6 +866,27 @@ class PublisherTests(unittest.TestCase):
                         self.assertEqual(proc.returncode, 0, err[-600:])
                     finally:
                         feeder.close()
+
+            from spartan_live import split_and_filter_targets, capture_target_preview_bgra
+            grouped_all = split_and_filter_targets(app.monitors, "")
+            self.assertEqual(len(grouped_all["screens"]), 1)
+            self.assertEqual(len(grouped_all["windows"]), 1)
+            grouped_filtered = split_and_filter_targets(app.monitors, "elden")
+            self.assertEqual(len(grouped_filtered["screens"]), 0)
+            self.assertEqual(len(grouped_filtered["windows"]), 1)
+            tw, th, raw = capture_target_preview_bgra(app.monitors[0], 208, 117)
+            self.assertEqual((tw, th, len(raw)), (208, 116, 208 * 116 * 4))
+
+            app.monitor_choice_widget.before_open = None
+            app.monitor_choice_widget.open_menu()
+            popup = app.monitor_choice_widget.popup
+            self.assertIsNotNone(popup)
+            self.assertEqual(len(popup.cards), 2)
+            popup.search_input.setText("elden")
+            self.assertEqual(len(popup.cards), 1)
+            popup.cards[0].on_pick(popup.cards[0].entry["label"])
+            self.assertEqual(app.monitor_choice.get(), app.monitor_labels[1])
+            self.assertIsNone(app.monitor_choice_widget.popup)
         finally:
             app.destroy()
 
