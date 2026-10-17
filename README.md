@@ -90,7 +90,11 @@ O site entrega só esse arquivo, e só com sessão.
 
 ### Uso
 
-O programa pede apelido, servidor, monitor, som do PC, microfone e a qualidade. O padrão é 1080p 60. A janela é Qt 6 (PySide6), sem a barra do Windows, e abre em 560×720 no centro do monitor principal. Arrastar a faixa de cima move a janela. As bordas e os cantos redimensionam pelo próprio Windows. O botão maximizar guarda o tamanho anterior.
+O programa pede apelido, servidor, tela ou janela/jogo, som do PC, microfone e a qualidade. O padrão é 1080p 60. A janela é Qt 6 (PySide6), sem a barra do Windows, e abre em 560×720 no centro do monitor principal. Arrastar a faixa de cima move a janela. As bordas e os cantos redimensionam pelo próprio Windows. O botão maximizar guarda o tamanho anterior.
+
+O seletor **Tela** lista os monitores (`Tela 1 — ...`) e também todas as janelas e jogos abertos (`Janela: Título (jogo.exe)`), atualizando a lista ao abrir o menu ou pelo botão **↻ Atualizar**. Na captura de janela/jogo, o programa usa *Windows Graphics Capture* com `IsBorderRequired = False` quando o sistema suporta, ou `PrintWindow` (`PW_RENDERFULLCONTENT`) com desenho do ponteiro real, garantindo captura **sem borda amarela** no Windows 10 e no Windows 11 e sem expor outras telas no `Alt+Tab`.
+
+No **Som do PC**, além do alto-falante inteiro, há a opção **Som da janela / jogo selecionado**, que usa *WASAPI Application Loopback* (`ActivateAudioInterfaceAsync` com `VAD\Process_Loopback` por `PID`) para capturar apenas o áudio daquela janela ou jogo (isolando chamadas do WhatsApp, Discord ou navegador). Ao escolher uma janela no menu **Tela**, o **Som do PC** muda sozinho para **Som da janela / jogo selecionado**; ao voltar para um monitor, ele restaura o alto-falante anterior.
 
 Abaixo de 560×720 aparecem barras de rolagem independentes, vertical, horizontal ou as duas, afastadas da borda para o clique pegar a barra e não o redimensionamento. A roda do mouse rola na vertical. Shift e a roda rolam na horizontal. O volume do PC e o do microfone têm medidor. Trocar a qualidade com a live aberta reinicia só o encoder, no mesmo apelido. A página mostra "Trocando qualidade!" e segue na ponta.
 
@@ -102,7 +106,7 @@ Apelido, servidor, qualidade, monitor e aparelhos ficam em `%APPDATA%\SpartanLiv
 
 O som do PC começa no alto-falante padrão. Dá para trocar o som ou o microfone com a live aberta quando ela começou com algum áudio. Os dois em "Sem som" deixam a transmissão sem canal de áudio até a próxima abertura.
 
-Trocar de monitor durante a live reinicia só a captura, no mesmo apelido. A página mostra "Trocando tela!" e segue na ponta.
+Trocar de monitor ou de janela/jogo durante a live reinicia só a captura de vídeo e redireciona o áudio para a nova seleção, no mesmo apelido. A página mostra "Trocando tela!" e segue na ponta.
 
 Minimizar vai para a bandeja. Parado, o ícone é `assets/Spartan-Live.ico`. Transmitindo, `assets/Spartan-Live-ON.ico`. "Abrir com o Windows, sem iniciar a live" só registra o executável. A live não começa sozinha.
 
@@ -118,7 +122,7 @@ O encoder usado é o primeiro que responder, nesta ordem: `h264_nvenc`, `h264_am
 | 720p 30 | 5 Mbps | 4 Mbps |
 | 480p 30 | 1,5 Mbps | 1,5 Mbps |
 
-A tela entra pelo filtro `ddagrab`, o monitor inteiro, com o ponteiro real. Se essa captura não abrir, usa `gdigrab`. O vídeo segue sozinho em MPEG-TS. O som do PC e o microfone são lidos no Windows, reamostrados com soxr para 48 kHz estéreo, somados em ponto flutuante e entregues em blocos de 20 ms. O segundo processo copia o vídeo e grava AAC a 256 kbps. O deslocamento na junção é zero.
+A tela entra pelo filtro `ddagrab`, o monitor inteiro, com o ponteiro real. Se essa captura não abrir, usa `gdigrab`. Em modo janela/jogo, os quadros BGRA entram por um *named pipe* (`\\.\pipe\spartan-vid-...`) com `-use_wallclock_as_timestamps 1` para o mesmo processo isolado de vídeo. O vídeo segue sozinho em MPEG-TS. O som do PC (ou o som isolado do processo da janela/jogo) e o microfone são lidos no Windows, reamostrados com soxr para 48 kHz estéreo, somados em ponto flutuante e entregues em blocos de 20 ms. O segundo processo copia o vídeo e grava AAC a 256 kbps. O deslocamento na junção é zero.
 
 O player usa `liveSyncDuration` 1.5, `maxLiveSyncPlaybackRate` 1 e `maxAudioFramesDrift` 10.
 

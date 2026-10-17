@@ -15,13 +15,21 @@ from spartan_live import (
     App,
     Choice,
     LiveAudio,
+    ProcessLoopbackStream,
+    WINDOW_AUDIO_LABEL,
+    WINDOW_AUDIO_TOKEN,
+    WindowVideoFeeder,
     _QtVar,
+    _WGCWindowGrabber,
     apply_startup,
     build_command,
     build_mux_command,
     capture_stalled,
     capture_input,
+    fit_aspect_box,
+    list_windows,
     match_output_index,
+    monitor_label,
     prefer_capture,
     plan_audio,
     progress_seconds,
@@ -32,6 +40,7 @@ from spartan_live import (
     valid_saved_geom,
     video_clock,
     wav_header,
+    window_label,
     downmix_float,
     merge_playback,
     next_chunk,
@@ -753,6 +762,110 @@ class PublisherTests(unittest.TestCase):
             self.assertIn("Trocando a qualidade para 720p 30", app.status.cget("text"))
             self.assertEqual(app._consume_quality_switch()[0], "720p30")
             self.assertIsNone(app._switch_quality)
+        finally:
+            app.destroy()
+
+    def test_janelas_e_jogos_sem_borda_amarela_e_som_isolado_por_pid(self):
+        win = {
+            "kind": "window",
+            "hwnd": 123456,
+            "pid": os.getpid(),
+            "exe": "EldenRing.exe",
+            "title": "ELDEN RING™",
+            "left": 0,
+            "top": 0,
+            "width": 1920,
+            "height": 1080,
+            "video_pipe": r"\\.\pipe\spartan-vid-test",
+        }
+        self.assertEqual(window_label(win), "Janela: ELDEN RING™ (EldenRing.exe)")
+        self.assertEqual(monitor_label(2, win), "Janela: ELDEN RING™ (EldenRing.exe)")
+        self.assertEqual(fit_aspect_box(1920, 1080, 1280, 720), (0, 0, 1280, 720))
+        ox, oy, fw, fh = fit_aspect_box(800, 600, 1920, 1080)
+        self.assertEqual(fh, 1080)
+        self.assertEqual(fw, 1440)
+        self.assertEqual((ox, oy), (240, 0))
+
+        cmd = build_command(
+            "ffmpeg.exe", "window", "h264_nvenc", 60, win, 2,
+            "rtmp://servidor/nick", True, 1920, 1080, "tcp://127.0.0.1:21000",
+        )
+        self.assertIn("rawvideo", cmd)
+        self.assertIn("bgra", cmd)
+        self.assertIn(r"\\.\pipe\spartan-vid-test", cmd)
+        self.assertIn("-use_wallclock_as_timestamps", cmd)
+        self.assertEqual(cmd[cmd.index("-filter:v") + 1], "format=yuv420p")
+
+        found_wins = list_windows()
+        self.assertIsInstance(found_wins, list)
+        for item in found_wins:
+            self.assertEqual(item.get("kind"), "window")
+            self.assertNotEqual(item.get("pid"), os.getpid())
+            self.assertNotEqual(item.get("exe", "").lower(), "spartanlive.exe")
+
+        # Test WASAPI Process Loopback isolation on current process PID
+        pls = ProcessLoopbackStream(os.getpid())
+        try:
+            chunk = pls.read(960)
+            self.assertGreaterEqual(len(chunk), 960 * 8)
+        finally:
+            pls.close()
+
+        # Test LiveAudio with pid:<PID>
+        live = LiveAudio(f"pid:{os.getpid()}", "")
+        try:
+            run_with_timeout(live.start, 5)
+            time.sleep(0.15)
+        finally:
+            live.close()
+
+        # Test UI integration: refresh button, auto window audio selection, and borderless WGC check
+        app = App()
+        try:
+            app.geometry("560x720+-2400+-2400")
+            app.update_idletasks()
+            self.assertIsNotNone(getattr(app, "refresh_btn", None))
+            self.assertIn(WINDOW_AUDIO_LABEL, app.pc_by_label)
+            self.assertEqual(app.pc_by_label[WINDOW_AUDIO_LABEL], WINDOW_AUDIO_TOKEN)
+            app.monitors = [
+                {"left": 0, "top": 0, "width": 1920, "height": 1080, "output": 0},
+                win,
+            ]
+            app.monitor_labels = [monitor_label(i, m) for i, m in enumerate(app.monitors)]
+            app.monitor_choice_widget.set_labels(app.monitor_labels)
+            app.pc_choice.set(next((lbl for lbl in app.pc_by_label if lbl != WINDOW_AUDIO_LABEL), "Sem som do PC"))
+            app.monitor_choice.set(app.monitor_labels[1])
+            self.assertEqual(app.pc_choice.get(), WINDOW_AUDIO_LABEL)
+            self.assertEqual(app.effective_pc_audio(), f"pid:{os.getpid()}")
+            app.monitor_choice.set(app.monitor_labels[0])
+            self.assertNotEqual(app.pc_choice.get(), WINDOW_AUDIO_LABEL)
+
+            if found_wins:
+                grabber = _WGCWindowGrabber(found_wins[0]["hwnd"])
+                try:
+                    if grabber.open():
+                        self.assertTrue(grabber.borderless_ok)
+                finally:
+                    grabber.close()
+                ffmpeg = os.path.join(os.path.dirname(__file__), "ffmpeg", "ffmpeg.exe")
+                if os.path.isfile(ffmpeg):
+                    vpipe = rf"\\.\pipe\spartan-vid-e2e-{os.getpid()}"
+                    feeder = WindowVideoFeeder(found_wins[0]["hwnd"], vpipe, 640, 360, 30)
+                    feeder.open_pipe()
+                    try:
+                        win_mon = dict(found_wins[0], video_pipe=vpipe)
+                        vcmd = build_command(
+                            ffmpeg, "window", "libx264", 30, win_mon, 0,
+                            "rtmp://203.0.113.10/diag", False, 640, 360,
+                        )
+                        vcmd = vcmd[:-3] + ["-t", "0.4", "-f", "null", "-"]
+                        proc = subprocess.Popen(
+                            vcmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                        )
+                        _out, err = proc.communicate(timeout=10)
+                        self.assertEqual(proc.returncode, 0, err[-600:])
+                    finally:
+                        feeder.close()
         finally:
             app.destroy()
 

@@ -1,4 +1,5 @@
 .env
+.codegraph/
 motor/mediamtx.yml
 publisher/publish.json
 publisher/build/

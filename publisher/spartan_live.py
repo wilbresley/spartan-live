@@ -212,6 +212,75 @@ def notify_stopped(host, nick, user, password):
 def grab_thumb(ffmpeg, monitor):
     folder = tempfile.mkdtemp(prefix="spartan-thumb-")
     target = os.path.join(folder, "frame.jpg")
+    if monitor.get("kind") == "window" and int(monitor.get("hwnd") or 0) > 0:
+        try:
+            user32 = ctypes.windll.user32
+            gdi32 = ctypes.windll.gdi32
+            hwnd = int(monitor["hwnd"])
+
+            class RECT(ctypes.Structure):
+                _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+            crect = RECT()
+            user32.GetClientRect(hwnd, ctypes.byref(crect))
+            cw = max(2, (int(crect.right - crect.left)) & ~1)
+            ch = max(2, (int(crect.bottom - crect.top)) & ~1)
+            flags = 3
+            if cw <= 16 or ch <= 16:
+                wrect = RECT()
+                user32.GetWindowRect(hwnd, ctypes.byref(wrect))
+                cw = max(2, (int(wrect.right - wrect.left)) & ~1)
+                ch = max(2, (int(wrect.bottom - wrect.top)) & ~1)
+                flags = 2
+            if cw > 16 and ch > 16 and user32.IsWindow(hwnd) and not user32.IsIconic(hwnd):
+                screen_dc = user32.GetDC(None)
+                mem_dc = gdi32.CreateCompatibleDC(screen_dc)
+                bmi = _BITMAPINFOHEADER()
+                bmi.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+                bmi.biWidth = cw
+                bmi.biHeight = -ch
+                bmi.biPlanes = 1
+                bmi.biBitCount = 32
+                bmi.biCompression = 0
+                bits = ctypes.c_void_p()
+                bmp = gdi32.CreateDIBSection(screen_dc, ctypes.byref(bmi), 0, ctypes.byref(bits), None, 0)
+                old = gdi32.SelectObject(mem_dc, bmp)
+                try:
+                    if user32.PrintWindow(hwnd, mem_dc, flags) and bits.value:
+                        raw = ctypes.string_at(bits.value, cw * ch * 4)
+                        cmd = [
+                            ffmpeg, "-hide_banner", "-loglevel", "error",
+                            "-f", "rawvideo", "-pix_fmt", "bgra",
+                            "-video_size", f"{cw}x{ch}", "-i", "pipe:0",
+                            "-frames:v", "1", "-vf", "scale=1280:-2", "-q:v", "5", "-y", target,
+                        ]
+                        subprocess.run(
+                            cmd, input=raw, timeout=8,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            creationflags=subprocess.CREATE_NO_WINDOW, check=False,
+                        )
+                        if os.path.isfile(target) and os.path.getsize(target) >= 32:
+                            with open(target, "rb") as handle:
+                                return handle.read()
+                finally:
+                    if old:
+                        gdi32.SelectObject(mem_dc, old)
+                    if bmp:
+                        gdi32.DeleteObject(bmp)
+                    gdi32.DeleteDC(mem_dc)
+                    user32.ReleaseDC(None, screen_dc)
+        except Exception:
+            pass
+        finally:
+            try:
+                os.remove(target)
+            except OSError:
+                pass
+            try:
+                os.rmdir(folder)
+            except OSError:
+                pass
+        return b""
     command = [
         ffmpeg, "-hide_banner", "-loglevel", "error",
         "-f", "gdigrab", "-framerate", "1",
@@ -521,10 +590,146 @@ def list_monitors():
 
 
 def monitor_label(index, monitor):
+    if monitor.get("kind") == "window":
+        return window_label(monitor)
     label = f"Tela {index + 1} — {monitor['width']}x{monitor['height']}"
     if monitor["left"] == 0 and monitor["top"] == 0:
         label += " (principal)"
     return label
+
+
+WINDOW_AUDIO_TOKEN = "__window_audio__"
+WINDOW_AUDIO_LABEL = "Som da janela / jogo selecionado"
+_IGNORED_WINDOW_EXES = frozenset({
+    "spartanlive.exe",
+    "applicationframehost.exe",
+    "shellexperiencehost.exe",
+    "searchhost.exe",
+    "searchapp.exe",
+    "startmenuexperiencehost.exe",
+    "textinputhost.exe",
+    "lockapp.exe",
+    "systemsettings.exe",
+})
+_IGNORED_WINDOW_CLASSES = frozenset({
+    "Progman",
+    "WorkerW",
+    "Shell_TrayWnd",
+    "Shell_SecondaryTrayWnd",
+    "Windows.UI.Core.CoreWindow",
+})
+
+
+def window_label(window):
+    title = " ".join(str(window.get("title") or "").split())
+    if len(title) > 44:
+        title = title[:41].rstrip() + "..."
+    exe = str(window.get("exe") or "").strip()
+    if exe:
+        return f"Janela: {title} ({exe})"
+    return f"Janela: {title}"
+
+
+def list_windows(own_pid=None):
+    """Lista todas as janelas e jogos visíveis na barra de tarefas em tempo real."""
+    try:
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        dwmapi = ctypes.windll.dwmapi
+    except Exception:
+        return []
+    my_pid = int(own_pid if own_pid is not None else os.getpid())
+    found = []
+    seen_hwnds = set()
+
+    class RECT(ctypes.Structure):
+        _fields_ = [
+            ("left", ctypes.c_long),
+            ("top", ctypes.c_long),
+            ("right", ctypes.c_long),
+            ("bottom", ctypes.c_long),
+        ]
+
+    WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    @WNDENUMPROC
+    def _enum_cb(hwnd, _lparam):
+        try:
+            h_val = int(hwnd or 0)
+            if not h_val or h_val in seen_hwnds:
+                return True
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            cloaked = ctypes.c_int(0)
+            if dwmapi.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked)) == 0 and cloaked.value:
+                return True
+            ex_style = user32.GetWindowLongW(hwnd, -20)
+            if (ex_style & 0x00000080) and not (ex_style & 0x00040000):
+                return True
+            owner = user32.GetWindow(hwnd, 4)
+            if owner and not (ex_style & 0x00040000):
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length <= 0:
+                return True
+            tbuf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, tbuf, length + 1)
+            title = tbuf.value.strip()
+            if not title or title == "Spartan Live":
+                return True
+            cbuf = ctypes.create_unicode_buffer(128)
+            user32.GetClassNameW(hwnd, cbuf, 128)
+            if cbuf.value in _IGNORED_WINDOW_CLASSES:
+                return True
+            pid = wintypes.DWORD(0)
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            pid_val = int(pid.value or 0)
+            if not pid_val or pid_val == my_pid:
+                return True
+            exe = ""
+            hproc = kernel32.OpenProcess(0x1000, False, pid_val)
+            if hproc:
+                try:
+                    ebuf = ctypes.create_unicode_buffer(512)
+                    sz = wintypes.DWORD(512)
+                    if kernel32.QueryFullProcessImageNameW(hproc, 0, ebuf, ctypes.byref(sz)):
+                        exe = os.path.basename(ebuf.value)
+                finally:
+                    kernel32.CloseHandle(hproc)
+            if exe.lower() in _IGNORED_WINDOW_EXES:
+                return True
+            crect = RECT()
+            user32.GetClientRect(hwnd, ctypes.byref(crect))
+            cw = int(crect.right - crect.left)
+            ch = int(crect.bottom - crect.top)
+            if cw <= 16 or ch <= 16:
+                wrect = RECT()
+                user32.GetWindowRect(hwnd, ctypes.byref(wrect))
+                cw = max(cw, int(wrect.right - wrect.left))
+                ch = max(ch, int(wrect.bottom - wrect.top))
+            if cw <= 16 or ch <= 16:
+                cw, ch = 1280, 720
+            seen_hwnds.add(h_val)
+            found.append({
+                "kind": "window",
+                "hwnd": h_val,
+                "pid": pid_val,
+                "exe": exe,
+                "title": title,
+                "left": 0,
+                "top": 0,
+                "width": max(2, cw & ~1),
+                "height": max(2, ch & ~1),
+            })
+        except Exception:
+            pass
+        return True
+
+    try:
+        user32.EnumWindows(_enum_cb, 0)
+    except Exception:
+        pass
+    return found
 
 
 QUALITY_OPTIONS = (
@@ -575,6 +780,8 @@ def encoder_args(encoder, fps, height=1080):
 
 
 def scale_filter(width=1920, height=1080, mode="gdigrab"):
+    if mode == "window":
+        return "format=yuv420p"
     scale = (
         f"scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos,"
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p"
@@ -606,7 +813,16 @@ def ffmpeg_filters(ffmpeg):
     return f"{done.stdout or ''}\n{done.stderr or ''}"
 
 
-def capture_input(mode, fps, monitor, output_idx):
+def capture_input(mode, fps, monitor, output_idx, width=1920, height=1080):
+    if mode == "window":
+        vpipe = monitor.get("video_pipe") or "-"
+        return [
+            "-f", "rawvideo",
+            "-pix_fmt", "bgra",
+            "-video_size", f"{int(width)}x{int(height)}",
+            "-framerate", str(int(fps)),
+            "-i", vpipe,
+        ]
     if mode == "ddagrab":
         index = capture_output_index(monitor, output_idx)
         spec = f"ddagrab=output_idx={index}:framerate={int(fps)}:draw_mouse=1"
@@ -729,7 +945,7 @@ def build_command(ffmpeg, mode, encoder, fps, monitor, output_idx, rtmp, with_au
         command.append("-use_wallclock_as_timestamps")
         command.append("1")
     command += [
-        *capture_input(mode, fps, monitor, output_idx),
+        *capture_input(mode, fps, monitor, output_idx, width, height),
         "-filter:v", scale_filter(width, height, mode),
         *encoder_args(encoder, fps, height),
     ]
@@ -825,6 +1041,8 @@ def list_sound_devices():
 
 def chosen_pc_audio(saved, devices, system_default):
     """O padrão é o alto-falante do Windows. Um aparelho salvo só vale se ele existir neste PC."""
+    if saved == WINDOW_AUDIO_TOKEN:
+        return WINDOW_AUDIO_TOKEN
     if saved:
         if saved in devices:
             return saved
@@ -945,6 +1163,718 @@ def _pipe_write(handle, blob):
     return bool(ok) and wrote.value == len(data)
 
 
+class _WGCSizeInt32(ctypes.Structure):
+    _fields_ = [("Width", ctypes.c_int32), ("Height", ctypes.c_int32)]
+
+
+class _D3D11_TEXTURE2D_DESC(ctypes.Structure):
+    _fields_ = [
+        ("Width", ctypes.c_uint),
+        ("Height", ctypes.c_uint),
+        ("MipLevels", ctypes.c_uint),
+        ("ArraySize", ctypes.c_uint),
+        ("Format", ctypes.c_uint),
+        ("SampleDesc_Count", ctypes.c_uint),
+        ("SampleDesc_Quality", ctypes.c_uint),
+        ("Usage", ctypes.c_uint),
+        ("BindFlags", ctypes.c_uint),
+        ("CPUAccessFlags", ctypes.c_uint),
+        ("MiscFlags", ctypes.c_uint),
+    ]
+
+
+class _D3D11_MAPPED_SUBRESOURCE(ctypes.Structure):
+    _fields_ = [
+        ("pData", ctypes.c_void_p),
+        ("RowPitch", ctypes.c_uint),
+        ("DepthPitch", ctypes.c_uint),
+    ]
+
+
+class _WIN32_POINT(ctypes.Structure):
+    _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+
+
+class _CURSORINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("flags", wintypes.DWORD),
+        ("hCursor", wintypes.HANDLE),
+        ("ptScreenPos", _WIN32_POINT),
+    ]
+
+
+class _WGCWindowGrabber:
+    """Captura acelerada Windows Graphics Capture com IsBorderRequired=False (sem borda amarela)."""
+
+    def __init__(self, hwnd):
+        self.hwnd = int(hwnd or 0)
+        self.d3d_device = ctypes.c_void_p()
+        self.d3d_ctx = ctypes.c_void_p()
+        self.dxgi_dev = ctypes.c_void_p()
+        self.winrt_d3d = ctypes.c_void_p()
+        self.item = ctypes.c_void_p()
+        self.pool = ctypes.c_void_p()
+        self.session = ctypes.c_void_p()
+        self.staging = ctypes.c_void_p()
+        self.staging_size = (0, 0)
+        self.pool_size = (0, 0)
+        self.borderless_ok = False
+        self.active = False
+
+    def open(self):
+        if not self.hwnd:
+            return False
+        try:
+            combase = ctypes.WinDLL("combase")
+            d3d11 = ctypes.WinDLL("d3d11")
+            combase.RoInitialize(1)
+            combase.WindowsCreateString.argtypes = [wintypes.LPCWSTR, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)]
+            combase.WindowsCreateString.restype = ctypes.c_long
+            combase.WindowsDeleteString.argtypes = [ctypes.c_void_p]
+            combase.WindowsDeleteString.restype = ctypes.c_long
+            combase.RoGetActivationFactory.argtypes = [ctypes.c_void_p, ctypes.POINTER(_GUID), ctypes.POINTER(ctypes.c_void_p)]
+            combase.RoGetActivationFactory.restype = ctypes.c_long
+
+            if d3d11.D3D11CreateDevice(
+                None, 1, None, 0x20, None, 0, 7,
+                ctypes.byref(self.d3d_device), None, ctypes.byref(self.d3d_ctx),
+            ) < 0 or not self.d3d_device.value:
+                self.close()
+                return False
+
+            iid_dxgi_dev = _guid("54ec77fa-1377-44e6-8c32-88fd5f44c84c")
+            if _com(self.d3d_device, 0, ctypes.c_long, ctypes.POINTER(_GUID), ctypes.POINTER(ctypes.c_void_p))(
+                self.d3d_device, ctypes.byref(iid_dxgi_dev), ctypes.byref(self.dxgi_dev),
+            ) < 0 or not self.dxgi_dev.value:
+                self.close()
+                return False
+
+            create_winrt = d3d11.CreateDirect3D11DeviceFromDXGIDevice
+            create_winrt.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+            create_winrt.restype = ctypes.c_long
+            if create_winrt(self.dxgi_dev, ctypes.byref(self.winrt_d3d)) < 0 or not self.winrt_d3d.value:
+                self.close()
+                return False
+
+            iid_interop = _guid("3628E81B-3CAC-4C60-B7F4-23CE0E0C3356")
+            iid_item = _guid("79c3f95b-31f7-4ec2-a464-632ef5d30760")
+            hs = ctypes.c_void_p()
+            cls_item = "Windows.Graphics.Capture.GraphicsCaptureItem"
+            combase.WindowsCreateString(cls_item, len(cls_item), ctypes.byref(hs))
+            interop = ctypes.c_void_p()
+            try:
+                combase.RoGetActivationFactory(hs, ctypes.byref(iid_interop), ctypes.byref(interop))
+            finally:
+                if hs.value:
+                    combase.WindowsDeleteString(hs)
+            if not interop.value:
+                self.close()
+                return False
+            try:
+                if _com(interop, 3, ctypes.c_long, wintypes.HWND, ctypes.POINTER(_GUID), ctypes.POINTER(ctypes.c_void_p))(
+                    interop, self.hwnd, ctypes.byref(iid_item), ctypes.byref(self.item),
+                ) < 0 or not self.item.value:
+                    self.close()
+                    return False
+            finally:
+                _release(interop)
+
+            sz = _WGCSizeInt32()
+            if _com(self.item, 7, ctypes.c_long, ctypes.POINTER(_WGCSizeInt32))(self.item, ctypes.byref(sz)) < 0:
+                self.close()
+                return False
+            w = max(64, int(sz.Width))
+            h = max(64, int(sz.Height))
+            sz.Width, sz.Height = w, h
+            self.pool_size = (w, h)
+
+            iid_pool_statics2 = _guid("589B103F-6BBC-5DF5-A991-02E28B3B66D5")
+            hs2 = ctypes.c_void_p()
+            cls_pool = "Windows.Graphics.Capture.Direct3D11CaptureFramePool"
+            combase.WindowsCreateString(cls_pool, len(cls_pool), ctypes.byref(hs2))
+            pool_statics = ctypes.c_void_p()
+            try:
+                combase.RoGetActivationFactory(hs2, ctypes.byref(iid_pool_statics2), ctypes.byref(pool_statics))
+            finally:
+                if hs2.value:
+                    combase.WindowsDeleteString(hs2)
+            if not pool_statics.value:
+                self.close()
+                return False
+            try:
+                if _com(
+                    pool_statics, 6, ctypes.c_long,
+                    ctypes.c_void_p, ctypes.c_int32, ctypes.c_int32, _WGCSizeInt32, ctypes.POINTER(ctypes.c_void_p),
+                )(pool_statics, self.winrt_d3d, 87, 2, sz, ctypes.byref(self.pool)) < 0 or not self.pool.value:
+                    self.close()
+                    return False
+            finally:
+                _release(pool_statics)
+
+            if _com(self.pool, 10, ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p))(
+                self.pool, self.item, ctypes.byref(self.session),
+            ) < 0 or not self.session.value:
+                self.close()
+                return False
+
+            # Cursor capture enabled
+            iid_sess2 = _guid("2C39AE40-7D2E-5044-804E-8B6799D4CF9E")
+            sess2 = ctypes.c_void_p()
+            if _com(self.session, 0, ctypes.c_long, ctypes.POINTER(_GUID), ctypes.POINTER(ctypes.c_void_p))(
+                self.session, ctypes.byref(iid_sess2), ctypes.byref(sess2),
+            ) >= 0 and sess2.value:
+                try:
+                    _com(sess2, 7, ctypes.c_long, ctypes.c_ubyte)(sess2, 1)
+                finally:
+                    _release(sess2)
+
+            # Disable yellow border (IGraphicsCaptureSession3.IsBorderRequired = False)
+            # If the OS build doesn't support hiding the border, decline WGC so PrintWindow captures borderlessly!
+            iid_sess3 = _guid("F2CDD966-22AE-5EA1-9596-3A289344C3BE")
+            sess3 = ctypes.c_void_p()
+            if _com(self.session, 0, ctypes.c_long, ctypes.POINTER(_GUID), ctypes.POINTER(ctypes.c_void_p))(
+                self.session, ctypes.byref(iid_sess3), ctypes.byref(sess3),
+            ) >= 0 and sess3.value:
+                try:
+                    if _com(sess3, 7, ctypes.c_long, ctypes.c_ubyte)(sess3, 0) >= 0:
+                        self.borderless_ok = True
+                finally:
+                    _release(sess3)
+
+            if not self.borderless_ok:
+                self.close()
+                return False
+
+            if _com(self.session, 6, ctypes.c_long)(self.session) < 0:
+                self.close()
+                return False
+            self.active = True
+            return True
+        except Exception:
+            self.close()
+            return False
+
+    def grab_into_hdc(self, hdc_dst, dst_w, dst_h, bmi_ptr, dst_bits_ptr):
+        if not self.active or not self.pool.value:
+            return False
+        frame = ctypes.c_void_p()
+        if _com(self.pool, 7, ctypes.c_long, ctypes.POINTER(ctypes.c_void_p))(self.pool, ctypes.byref(frame)) < 0 or not frame.value:
+            return False
+        surface = ctypes.c_void_p()
+        access = ctypes.c_void_p()
+        tex = ctypes.c_void_p()
+        try:
+            if _com(frame, 6, ctypes.c_long, ctypes.POINTER(ctypes.c_void_p))(frame, ctypes.byref(surface)) < 0 or not surface.value:
+                return False
+            iid_access = _guid("A9B3D012-3DF2-4EE3-B8D1-8695F457D3C1")
+            if _com(surface, 0, ctypes.c_long, ctypes.POINTER(_GUID), ctypes.POINTER(ctypes.c_void_p))(
+                surface, ctypes.byref(iid_access), ctypes.byref(access),
+            ) < 0 or not access.value:
+                return False
+            iid_tex2d = _guid("6f15aaf2-d208-4e89-9ab4-489535d34f9c")
+            if _com(access, 3, ctypes.c_long, ctypes.POINTER(_GUID), ctypes.POINTER(ctypes.c_void_p))(
+                access, ctypes.byref(iid_tex2d), ctypes.byref(tex),
+            ) < 0 or not tex.value:
+                return False
+            desc = _D3D11_TEXTURE2D_DESC()
+            _com(tex, 10, None, ctypes.POINTER(_D3D11_TEXTURE2D_DESC))(tex, ctypes.byref(desc))
+            tw, th = int(desc.Width), int(desc.Height)
+            if tw <= 4 or th <= 4:
+                return False
+            if (tw, th) != self.pool_size:
+                self.pool_size = (tw, th)
+                sz = _WGCSizeInt32(tw, th)
+                _com(self.pool, 6, ctypes.c_long, ctypes.c_void_p, ctypes.c_int32, ctypes.c_int32, _WGCSizeInt32)(
+                    self.pool, self.winrt_d3d, 87, 2, sz,
+                )
+            if not self.staging.value or self.staging_size != (tw, th):
+                if self.staging.value:
+                    _release(self.staging)
+                    self.staging = ctypes.c_void_p()
+                sdesc = _D3D11_TEXTURE2D_DESC(tw, th, 1, 1, desc.Format, 1, 0, 3, 0, 0x20000, 0)
+                if _com(
+                    self.d3d_device, 5, ctypes.c_long,
+                    ctypes.POINTER(_D3D11_TEXTURE2D_DESC), ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+                )(self.d3d_device, ctypes.byref(sdesc), None, ctypes.byref(self.staging)) < 0 or not self.staging.value:
+                    return False
+                self.staging_size = (tw, th)
+
+            _com(self.d3d_ctx, 47, None, ctypes.c_void_p, ctypes.c_void_p)(self.d3d_ctx, self.staging, tex)
+            mapped = _D3D11_MAPPED_SUBRESOURCE()
+            if _com(
+                self.d3d_ctx, 14, ctypes.c_long,
+                ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint, ctypes.c_uint, ctypes.POINTER(_D3D11_MAPPED_SUBRESOURCE),
+            )(self.d3d_ctx, self.staging, 0, 1, 0, ctypes.byref(mapped)) < 0 or not mapped.pData:
+                return False
+            try:
+                if tw == dst_w and th == dst_h and int(mapped.RowPitch) == dst_w * 4:
+                    ctypes.memmove(dst_bits_ptr, mapped.pData, dst_w * dst_h * 4)
+                else:
+                    scale = min(dst_w / float(tw), dst_h / float(th))
+                    fit_w = max(2, min(dst_w, int(round(tw * scale))))
+                    fit_h = max(2, min(dst_h, int(round(th * scale))))
+                    off_x = (dst_w - fit_w) // 2
+                    off_y = (dst_h - fit_h) // 2
+                    ctypes.memset(dst_bits_ptr, 0, dst_w * dst_h * 4)
+                    src_arr = np.ctypeslib.as_array(
+                        (ctypes.c_uint32 * ((int(mapped.RowPitch) // 4) * th)).from_address(mapped.pData)
+                    ).reshape((th, int(mapped.RowPitch) // 4))[:, :tw]
+                    dst_arr = np.ctypeslib.as_array(
+                        (ctypes.c_uint32 * (dst_w * dst_h)).from_address(dst_bits_ptr)
+                    ).reshape((dst_h, dst_w))
+                    yi = (np.arange(fit_h, dtype=np.int32) * th) // fit_h
+                    xi = (np.arange(fit_w, dtype=np.int32) * tw) // fit_w
+                    dst_arr[off_y:off_y + fit_h, off_x:off_x + fit_w] = src_arr[yi[:, None], xi[None, :]]
+                return True
+            finally:
+                _com(self.d3d_ctx, 15, None, ctypes.c_void_p, ctypes.c_uint)(self.d3d_ctx, self.staging, 0)
+        except Exception:
+            return False
+        finally:
+            _release(tex)
+            _release(access)
+            _release(surface)
+            _release(frame)
+
+    def close(self):
+        self.active = False
+        for attr in ("staging", "session", "pool", "item", "winrt_d3d", "dxgi_dev", "d3d_ctx", "d3d_device"):
+            ptr = getattr(self, attr, None)
+            if ptr is not None and ptr.value:
+                try:
+                    _release(ptr)
+                except Exception:
+                    pass
+                setattr(self, attr, ctypes.c_void_p())
+
+
+def fit_aspect_box(src_w, src_h, dst_w, dst_h):
+    """Calcula a caixa centralizada mantendo a proporção da janela dentro do quadro final."""
+    sw = max(1, int(src_w))
+    sh = max(1, int(src_h))
+    dw = max(2, int(dst_w))
+    dh = max(2, int(dst_h))
+    scale = min(dw / float(sw), dh / float(sh))
+    fw = max(2, min(dw, int(round(sw * scale))))
+    fh = max(2, min(dh, int(round(sh * scale))))
+    return (dw - fw) // 2, (dh - fh) // 2, fw, fh
+
+
+class WindowVideoFeeder:
+    """Captura somente a janela/jogo escolhido sem borda amarela (Win10 e Win11) e entrega quadros BGRA contínuos."""
+
+    def __init__(self, hwnd, pipe_name, width, height, fps):
+        self.hwnd = int(hwnd or 0)
+        self.pipe_name = pipe_name
+        self.width = max(2, int(width) & ~1)
+        self.height = max(2, int(height) & ~1)
+        self.fps = max(1, int(fps))
+        self.pipe = None
+        self.stop = False
+        self.thread = None
+
+    def open_pipe(self):
+        self.close()
+        self.stop = False
+        buf_sz = max(1 << 22, self.width * self.height * 4 * 2)
+        handle = _k32.CreateNamedPipeW(self.pipe_name, _PIPE_OUT, 0, 1, buf_sz, 65536, 0, None)
+        if not _pipe_ok(handle):
+            raise OSError(f"não abri o cano de vídeo da janela ({ctypes.get_last_error()})")
+        self.pipe = handle
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _run(self):
+        handle = self.pipe
+        if not _pipe_ok(handle):
+            return
+        connected = _k32.ConnectNamedPipe(handle, None)
+        if not connected and ctypes.get_last_error() not in (0, _PIPE_CONNECTED):
+            return
+
+        user32 = ctypes.windll.user32
+        gdi32 = ctypes.windll.gdi32
+
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", ctypes.c_long),
+                ("top", ctypes.c_long),
+                ("right", ctypes.c_long),
+                ("bottom", ctypes.c_long),
+            ]
+
+        screen_dc = user32.GetDC(None)
+        dst_dc = gdi32.CreateCompatibleDC(screen_dc)
+        bmi = _BITMAPINFOHEADER()
+        bmi.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+        bmi.biWidth = self.width
+        bmi.biHeight = -self.height
+        bmi.biPlanes = 1
+        bmi.biBitCount = 32
+        bmi.biCompression = 0
+        dst_bits = ctypes.c_void_p()
+        dst_bmp = gdi32.CreateDIBSection(screen_dc, ctypes.byref(bmi), 0, ctypes.byref(dst_bits), None, 0)
+        old_dst = gdi32.SelectObject(dst_dc, dst_bmp)
+        gdi32.SetStretchBltMode(dst_dc, 3)
+
+        src_dc = gdi32.CreateCompatibleDC(screen_dc)
+        src_bmp = None
+        old_src = None
+        src_size = (0, 0)
+
+        frame_bytes = self.width * self.height * 4
+        if dst_bits.value:
+            ctypes.memset(dst_bits.value, 0, frame_bytes)
+
+        wgc = _WGCWindowGrabber(self.hwnd)
+        use_wgc = wgc.open()
+
+        interval = 1.0 / float(self.fps)
+        next_at = time.perf_counter()
+        wrote = wintypes.DWORD(0)
+
+        try:
+            while not self.stop:
+                now = time.perf_counter()
+                delay = next_at - now
+                if delay > 0:
+                    time.sleep(delay if delay < interval else interval)
+                    continue
+                next_at += interval
+                if time.perf_counter() - next_at > interval * 3:
+                    next_at = time.perf_counter()
+
+                grabbed = False
+                if user32.IsWindow(self.hwnd) and not user32.IsIconic(self.hwnd):
+                    if use_wgc:
+                        grabbed = wgc.grab_into_hdc(dst_dc, self.width, self.height, ctypes.byref(bmi), dst_bits.value)
+                    if not grabbed:
+                        crect = RECT()
+                        user32.GetClientRect(self.hwnd, ctypes.byref(crect))
+                        cw = int(crect.right - crect.left)
+                        ch = int(crect.bottom - crect.top)
+                        flags = 3  # PW_CLIENTONLY | PW_RENDERFULLCONTENT
+                        if cw <= 8 or ch <= 8:
+                            wrect = RECT()
+                            user32.GetWindowRect(self.hwnd, ctypes.byref(wrect))
+                            cw = int(wrect.right - wrect.left)
+                            ch = int(wrect.bottom - wrect.top)
+                            flags = 2  # PW_RENDERFULLCONTENT
+                        if cw > 8 and ch > 8:
+                            if (cw, ch) != src_size or not src_bmp:
+                                if old_src:
+                                    gdi32.SelectObject(src_dc, old_src)
+                                if src_bmp:
+                                    gdi32.DeleteObject(src_bmp)
+                                src_bmp = gdi32.CreateCompatibleBitmap(screen_dc, cw, ch)
+                                old_src = gdi32.SelectObject(src_dc, src_bmp)
+                                src_size = (cw, ch)
+                            if user32.PrintWindow(self.hwnd, src_dc, flags):
+                                ci = _CURSORINFO()
+                                ci.cbSize = ctypes.sizeof(_CURSORINFO)
+                                if user32.GetCursorInfo(ctypes.byref(ci)) and (ci.flags & 1):
+                                    pt = _WIN32_POINT(ci.ptScreenPos.x, ci.ptScreenPos.y)
+                                    if user32.ScreenToClient(self.hwnd, ctypes.byref(pt)):
+                                        if 0 <= pt.x < cw and 0 <= pt.y < ch:
+                                            user32.DrawIconEx(src_dc, pt.x, pt.y, ci.hCursor, 0, 0, 0, None, 3)
+                                ox, oy, fw, fh = fit_aspect_box(cw, ch, self.width, self.height)
+                                if fw < self.width or fh < self.height:
+                                    ctypes.memset(dst_bits.value, 0, frame_bytes)
+                                gdi32.StretchBlt(dst_dc, ox, oy, fw, fh, src_dc, 0, 0, cw, ch, 0x00CC0020)
+                                grabbed = True
+
+                if not _k32.WriteFile(handle, dst_bits, frame_bytes, ctypes.byref(wrote), None):
+                    break
+        finally:
+            wgc.close()
+            if old_src:
+                gdi32.SelectObject(src_dc, old_src)
+            if src_bmp:
+                gdi32.DeleteObject(src_bmp)
+            gdi32.DeleteDC(src_dc)
+            if old_dst:
+                gdi32.SelectObject(dst_dc, old_dst)
+            if dst_bmp:
+                gdi32.DeleteObject(dst_bmp)
+            gdi32.DeleteDC(dst_dc)
+            user32.ReleaseDC(None, screen_dc)
+
+    def close(self):
+        self.stop = True
+        handle = self.pipe
+        self.pipe = None
+        if handle:
+            try:
+                ctypes.windll.kernel32.CloseHandle(int(handle))
+            except Exception:
+                pass
+        thread = self.thread
+        self.thread = None
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=1)
+
+
+class _WASAPI_WAVEFORMATEX(ctypes.Structure):
+    _fields_ = [
+        ("wFormatTag", wintypes.WORD),
+        ("nChannels", wintypes.WORD),
+        ("nSamplesPerSec", wintypes.DWORD),
+        ("nAvgBytesPerSec", wintypes.DWORD),
+        ("nBlockAlign", wintypes.WORD),
+        ("wBitsPerSample", wintypes.WORD),
+        ("cbSize", wintypes.WORD),
+    ]
+
+
+class _AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS(ctypes.Structure):
+    _fields_ = [
+        ("TargetProcessId", wintypes.DWORD),
+        ("ProcessLoopbackMode", ctypes.c_int),
+    ]
+
+
+class _AUDIOCLIENT_ACTIVATION_PARAMS(ctypes.Structure):
+    _fields_ = [
+        ("ActivationType", ctypes.c_int),
+        ("ProcessLoopbackParams", _AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS),
+    ]
+
+
+class _PROPVARIANT_BLOB(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.ULONG),
+        ("pBlobData", ctypes.c_void_p),
+    ]
+
+
+class _WASAPI_PROPVARIANT(ctypes.Structure):
+    _fields_ = [
+        ("vt", wintypes.USHORT),
+        ("wReserved1", wintypes.USHORT),
+        ("wReserved2", wintypes.USHORT),
+        ("wReserved3", wintypes.USHORT),
+        ("blob", _PROPVARIANT_BLOB),
+    ]
+
+
+_QI_T = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(_GUID), ctypes.POINTER(ctypes.c_void_p))
+_ADDREF_T = ctypes.WINFUNCTYPE(wintypes.ULONG, ctypes.c_void_p)
+_RELEASE_T = ctypes.WINFUNCTYPE(wintypes.ULONG, ctypes.c_void_p)
+_COMPLETED_T = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)
+
+
+class _ActivateHandlerVtbl(ctypes.Structure):
+    _fields_ = [
+        ("QueryInterface", _QI_T),
+        ("AddRef", _ADDREF_T),
+        ("Release", _RELEASE_T),
+        ("ActivateCompleted", _COMPLETED_T),
+    ]
+
+
+class _ActivateHandlerObj(ctypes.Structure):
+    _fields_ = [("lpVtbl", ctypes.POINTER(_ActivateHandlerVtbl))]
+
+
+class ProcessLoopbackStream:
+    """Captura de som isolada de um único processo (PID) via WASAPI Process Loopback."""
+
+    def __init__(self, pid):
+        self.pid = int(pid or 0)
+        self.audio_client = ctypes.c_void_p()
+        self.capture_client = ctypes.c_void_p()
+        self.event = None
+        self._spartan_closed = False
+        self._open()
+
+    def _open(self):
+        if self.pid <= 0:
+            raise RuntimeError("Nenhuma janela selecionada para capturar o som.")
+        ole32 = ctypes.windll.ole32
+        mmdevapi = ctypes.windll.mmdevapi
+        kernel32 = ctypes.windll.kernel32
+        ole32.CoInitializeEx(None, 0)
+
+        iid_unknown = _guid("00000000-0000-0000-C000-000000000046")
+        iid_agile = _guid("94ea2b94-e9cc-49e0-c0ff-ee64ca8f5b90")
+        iid_handler = _guid("41D949AB-9862-444A-80F6-C261334DA5EB")
+        iid_audio_client = _guid("1CB9AD4C-DBFA-4c32-B178-C2F568A703B2")
+        iid_capture_client = _guid("C8ADBD64-E71E-48a0-A4DE-185C395CD317")
+
+        done_event = kernel32.CreateEventW(None, True, False, None)
+
+        @_QI_T
+        def _qi(this, riid, ppv):
+            if not ppv:
+                return -2147467261
+            raw = bytes(riid.contents)
+            if raw in (bytes(iid_unknown), bytes(iid_handler), bytes(iid_agile)):
+                ppv[0] = this
+                return 0
+            ppv[0] = None
+            return -2147467262
+
+        @_ADDREF_T
+        def _addref(_this):
+            return 1
+
+        @_RELEASE_T
+        def _release_cb(_this):
+            return 1
+
+        @_COMPLETED_T
+        def _completed(_this, _op):
+            kernel32.SetEvent(done_event)
+            return 0
+
+        vtbl = _ActivateHandlerVtbl(_qi, _addref, _release_cb, _completed)
+        handler = _ActivateHandlerObj(ctypes.pointer(vtbl))
+
+        params = _AUDIOCLIENT_ACTIVATION_PARAMS(
+            1, _AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS(self.pid, 0),
+        )
+        prop = _WASAPI_PROPVARIANT(
+            65, 0, 0, 0, _PROPVARIANT_BLOB(ctypes.sizeof(params), ctypes.addressof(params)),
+        )
+
+        activate_fn = mmdevapi.ActivateAudioInterfaceAsync
+        activate_fn.argtypes = [
+            wintypes.LPCWSTR,
+            ctypes.POINTER(_GUID),
+            ctypes.POINTER(_WASAPI_PROPVARIANT),
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        activate_fn.restype = ctypes.c_long
+
+        op_ptr = ctypes.c_void_p()
+        try:
+            hr = activate_fn(
+                "VAD\\Process_Loopback",
+                ctypes.byref(iid_audio_client),
+                ctypes.byref(prop),
+                ctypes.addressof(handler),
+                ctypes.byref(op_ptr),
+            )
+            if hr < 0 or not op_ptr.value:
+                raise RuntimeError("O Windows não abriu o som exclusivo desta janela.")
+            kernel32.WaitForSingleObject(done_event, 3000)
+            hr_act = ctypes.c_long(-1)
+            hr2 = _com(
+                op_ptr, 3, ctypes.c_long,
+                ctypes.POINTER(ctypes.c_long), ctypes.POINTER(ctypes.c_void_p),
+            )(op_ptr, ctypes.byref(hr_act), ctypes.byref(self.audio_client))
+            if hr2 < 0 or hr_act.value < 0 or not self.audio_client.value:
+                raise RuntimeError("Não consegui abrir o som exclusivo desta janela.")
+        finally:
+            if op_ptr.value:
+                _release(op_ptr)
+            if done_event:
+                kernel32.CloseHandle(done_event)
+
+        wfx = _WASAPI_WAVEFORMATEX(3, 2, AUDIO_RATE, AUDIO_RATE * 8, 8, 32, 0)
+        flags = 0x00020000 | 0x00040000 | 0x80000000 | 0x08000000
+        hr_init = _com(
+            self.audio_client, 3, ctypes.c_long,
+            ctypes.c_int, wintypes.DWORD, ctypes.c_longlong, ctypes.c_longlong,
+            ctypes.POINTER(_WASAPI_WAVEFORMATEX), ctypes.c_void_p,
+        )(self.audio_client, 0, flags, 200000, 0, ctypes.byref(wfx), None)
+        if hr_init < 0:
+            self.close()
+            raise RuntimeError("Formato de som da janela não suportado.")
+
+        self.event = kernel32.CreateEventW(None, False, False, None)
+        if _com(self.audio_client, 13, ctypes.c_long, wintypes.HANDLE)(self.audio_client, self.event) < 0:
+            self.close()
+            raise RuntimeError("Falha ao vincular evento de som da janela.")
+
+        if _com(
+            self.audio_client, 14, ctypes.c_long,
+            ctypes.POINTER(_GUID), ctypes.POINTER(ctypes.c_void_p),
+        )(self.audio_client, ctypes.byref(iid_capture_client), ctypes.byref(self.capture_client)) < 0 or not self.capture_client.value:
+            self.close()
+            raise RuntimeError("Não consegui iniciar o leitor de som da janela.")
+
+        if _com(self.audio_client, 10, ctypes.c_long)(self.audio_client) < 0:
+            self.close()
+            raise RuntimeError("Não consegui dar partida no som da janela.")
+
+    def read(self, count, exception_on_overflow=False):
+        if self._spartan_closed or not self.capture_client.value:
+            raise OSError("fechado")
+        kernel32 = ctypes.windll.kernel32
+        out = bytearray()
+        target_bytes = max(1, int(count)) * 8
+        deadline = time.perf_counter() + 0.04
+        while len(out) < target_bytes and not self._spartan_closed:
+            pkt = wintypes.UINT(0)
+            if _com(self.capture_client, 5, ctypes.c_long, ctypes.POINTER(wintypes.UINT))(
+                self.capture_client, ctypes.byref(pkt),
+            ) < 0:
+                break
+            while pkt.value > 0 and not self._spartan_closed:
+                data_ptr = ctypes.c_void_p()
+                frames = wintypes.UINT(0)
+                flags = wintypes.DWORD(0)
+                if _com(
+                    self.capture_client, 3, ctypes.c_long,
+                    ctypes.POINTER(ctypes.c_void_p),
+                    ctypes.POINTER(wintypes.UINT),
+                    ctypes.POINTER(wintypes.DWORD),
+                    ctypes.c_void_p,
+                    ctypes.c_void_p,
+                )(self.capture_client, ctypes.byref(data_ptr), ctypes.byref(frames), ctypes.byref(flags), None, None) < 0:
+                    break
+                nbytes = int(frames.value) * 8
+                if nbytes > 0:
+                    if (flags.value & 2) or not data_ptr.value:
+                        out.extend(bytes(nbytes))
+                    else:
+                        out.extend(ctypes.string_at(data_ptr.value, nbytes))
+                _com(self.capture_client, 4, ctypes.c_long, wintypes.UINT)(self.capture_client, frames.value)
+                if _com(self.capture_client, 5, ctypes.c_long, ctypes.POINTER(wintypes.UINT))(
+                    self.capture_client, ctypes.byref(pkt),
+                ) < 0:
+                    break
+            if len(out) >= target_bytes or time.perf_counter() >= deadline:
+                break
+            if self.event:
+                kernel32.WaitForSingleObject(self.event, 15)
+        if not out:
+            return bytes(max(128, int(count)) * 8)
+        return bytes(out)
+
+    def stop_stream(self):
+        if self.audio_client.value:
+            try:
+                _com(self.audio_client, 11, ctypes.c_long)(self.audio_client)
+            except Exception:
+                pass
+
+    def close(self):
+        self._spartan_closed = True
+        self.stop_stream()
+        if self.capture_client.value:
+            try:
+                _release(self.capture_client)
+            except Exception:
+                pass
+            self.capture_client = ctypes.c_void_p()
+        if self.audio_client.value:
+            try:
+                _release(self.audio_client)
+            except Exception:
+                pass
+            self.audio_client = ctypes.c_void_p()
+        if self.event:
+            try:
+                ctypes.windll.kernel32.CloseHandle(self.event)
+            except Exception:
+                pass
+            self.event = None
+
+
 class LiveAudio:
     """Lê o WASAPI no formato do aparelho, reamostra com soxr e soma em float. Um buraco vira silêncio."""
 
@@ -996,12 +1926,28 @@ class LiveAudio:
         api = self.audio.get_host_api_info_by_type(pyaudio.paWASAPI)["index"]
         devices = [self.audio.get_device_info_by_index(i) for i in range(self.audio.get_device_count())]
         if self.pc_name:
-            source = self._find(devices, api, self.pc_name, loopback=True)
-            self._open_keepalive(devices, api, source)
-            self._open_capture(source, "pc")
+            if str(self.pc_name).startswith("pid:"):
+                try:
+                    target_pid = int(str(self.pc_name).split(":", 1)[1])
+                except ValueError:
+                    target_pid = 0
+                self._open_process_capture(target_pid, "pc")
+            else:
+                source = self._find(devices, api, self.pc_name, loopback=True)
+                self._open_keepalive(devices, api, source)
+                self._open_capture(source, "pc")
         if self.mic_name:
             source = self._find(devices, api, self.mic_name, loopback=False)
             self._open_capture(source, "mic")
+
+    def _open_process_capture(self, pid, key):
+        channels = 2
+        rate = AUDIO_RATE
+        block = AUDIO_CHUNK
+        self.queues[key] = np.zeros((0, 2), np.float32)
+        stream = ProcessLoopbackStream(pid)
+        self.streams.append(stream)
+        self.jobs.append((stream, channels, rate, key, block, "float"))
 
     def _find(self, devices, api, name, loopback):
         for info in devices:
@@ -1427,7 +2373,7 @@ class _ChoicePopup(QFrame):
 class Choice(QWidget):
     """Lista escura com canto arredondado e anti-aliasing nativo Qt."""
 
-    def __init__(self, master, variable, labels, bg, field, fg, accent):
+    def __init__(self, master, variable, labels, bg, field, fg, accent, before_open=None):
         _ensure_qt_app()
         super().__init__(master if isinstance(master, QWidget) else None)
         self.variable = variable
@@ -1437,6 +2383,7 @@ class Choice(QWidget):
         self.fg = fg
         self.accent = accent
         self.line = "#343434"
+        self.before_open = before_open
         self.popup = None
         self.canvas = self
         self.setFixedHeight(44)
@@ -1513,6 +2460,11 @@ class Choice(QWidget):
         painter.end()
 
     def open_menu(self):
+        if callable(self.before_open):
+            try:
+                self.before_open()
+            except Exception:
+                pass
         self.close_menu()
         w = max(self.width(), 220)
         row = 36
@@ -1523,6 +2475,10 @@ class Choice(QWidget):
         popup.move(global_pos)
         self.popup = popup
         popup.show()
+
+    def set_labels(self, labels):
+        self.labels = list(labels) or [""]
+        self.redraw()
 
     def pick(self, label):
         self.variable.set(label)
@@ -2284,10 +3240,13 @@ class App(QWidget):
         self._viewers_count = 0
         self._last_viewer_poll = 0.0
         self._hotkeys_installed = False
+        self._window_feeder = None
         self.publish = load_json(existing_file("publish.json"), {})
         self.settings = load_json(settings_path(), {})
-        self.monitors = list_monitors()
-        safe_geom = valid_saved_geom(self.settings.get("window_geom"), self.monitors)
+        self.base_monitors = list_monitors()
+        self.windows = list_windows()
+        self.monitors = [*self.base_monitors, *self.windows]
+        safe_geom = valid_saved_geom(self.settings.get("window_geom"), self.base_monitors)
         if safe_geom:
             self.geometry(safe_geom)
         self._build()
@@ -2820,23 +3779,31 @@ class App(QWidget):
         if saved >= len(self.monitor_labels):
             saved = 0
         self.monitor_choice = _QtVar(self.monitor_labels[saved])
-        self._choice("Tela", self.monitor_choice, self.monitor_labels)
+        self._choice("Tela", self.monitor_choice, self.monitor_labels, before_open=self.refresh_targets, refresh_cmd=self.refresh_targets)
         self.monitor_choice.trace_add("write", lambda *_args: self._screen_changed())
 
         self.pc_devices = []
         self.mic_devices = []
-        self.pc_by_label = {}
+        self.pc_by_label = {WINDOW_AUDIO_LABEL: WINDOW_AUDIO_TOKEN}
         try:
             self.pc_devices, self.mic_devices = list_sound_devices()
         except Exception:
             self.pc_devices, self.mic_devices = [], []
-        pc_labels = ["Sem som do PC"]
+        pc_labels = ["Sem som do PC", WINDOW_AUDIO_LABEL]
         for name in self.pc_devices:
             label = playback_label(name)
             self.pc_by_label[label] = name
             pc_labels.append(label)
         saved_pc = chosen_pc_audio(self.settings.get("pc_audio"), self.pc_devices, system_default_playback())
         saved_pc_label = next((label for label, full in self.pc_by_label.items() if full == saved_pc), "Sem som do PC")
+        self._last_speaker_label = (
+            saved_pc_label
+            if saved_pc_label not in ("Sem som do PC", WINDOW_AUDIO_LABEL)
+            else next(
+                (label for label, full in self.pc_by_label.items() if full == system_default_playback()),
+                pc_labels[2] if len(pc_labels) > 2 else "Sem som do PC",
+            )
+        )
         saved_mic = self.settings.get("mic") or ""
         if saved_mic not in self.mic_devices:
             saved_mic = ""
@@ -2991,7 +3958,7 @@ class App(QWidget):
         vbox.addWidget(entry)
         self._content_layout.addWidget(box)
 
-    def _choice(self, label, variable, labels, volume_var=None, volume_cmd=None):
+    def _choice(self, label, variable, labels, volume_var=None, volume_cmd=None, before_open=None, refresh_cmd=None):
         box = QWidget(self.content)
         vbox = QVBoxLayout(box)
         vbox.setContentsMargins(0, 0, 0, 0)
@@ -3005,15 +3972,46 @@ class App(QWidget):
         lbl.setStyleSheet(f"color: {self.muted};")
         hbox.addWidget(lbl)
         hbox.addStretch(1)
+        if refresh_cmd is not None:
+            self.refresh_btn = _MiniTagButton(head, "↻ Atualizar", "#252525", self.fg, self.accent, refresh_cmd)
+            hbox.addWidget(self.refresh_btn)
         pill = None
         if volume_var is not None:
             pill = VolumePill(head, volume_var, volume_cmd, self.bg, self.field, self.muted, self.accent)
             hbox.addWidget(pill)
         vbox.addWidget(head)
-        ch = Choice(box, variable, labels, self.bg, self.field, self.fg, self.accent)
+        ch = Choice(box, variable, labels, self.bg, self.field, self.fg, self.accent, before_open=before_open)
+        if refresh_cmd is not None:
+            self.monitor_choice_widget = ch
         vbox.addWidget(ch)
         self._content_layout.addWidget(box)
         return pill
+
+    def refresh_targets(self):
+        current_label = self.monitor_choice.get() if hasattr(self, "monitor_choice") else ""
+        current_idx = self.selected_monitor() if hasattr(self, "monitor_choice") else 0
+        current_item = self.monitors[current_idx] if 0 <= current_idx < len(self.monitors) else None
+        self.base_monitors = list_monitors()
+        self.windows = list_windows()
+        self.monitors = [*self.base_monitors, *self.windows]
+        self.monitor_labels = [monitor_label(i, monitor) for i, monitor in enumerate(self.monitors)] or ["Tela 1"]
+        widget = getattr(self, "monitor_choice_widget", None)
+        if widget is not None:
+            widget.set_labels(self.monitor_labels)
+        if current_label in self.monitor_labels:
+            return
+        if current_item and current_item.get("kind") == "window":
+            hwnd = int(current_item.get("hwnd") or 0)
+            for idx, item in enumerate(self.monitors):
+                if item.get("kind") == "window" and int(item.get("hwnd") or 0) == hwnd:
+                    self.monitor_choice._value = self.monitor_labels[idx]
+                    if widget is not None:
+                        widget.redraw()
+                    return
+        if self.monitor_labels:
+            self.monitor_choice._value = self.monitor_labels[0]
+            if widget is not None:
+                widget.redraw()
 
     def _paint_quality(self):
         current = self.quality.get()
@@ -3034,6 +4032,17 @@ class App(QWidget):
 
     def selected_pc_audio(self):
         return self.pc_by_label.get(self.pc_choice.get(), "")
+
+    def effective_pc_audio(self, monitor_idx=None):
+        raw = self.selected_pc_audio()
+        if raw != WINDOW_AUDIO_TOKEN:
+            return raw
+        idx = self.selected_monitor() if monitor_idx is None else int(monitor_idx)
+        if 0 <= idx < len(self.monitors):
+            mon = self.monitors[idx]
+            if mon.get("kind") == "window" and int(mon.get("pid") or 0) > 0:
+                return f"pid:{int(mon['pid'])}"
+        return system_default_playback() or (self.pc_devices[0] if self.pc_devices else "")
 
     def selected_mic(self):
         choice = self.mic_choice.get()
@@ -3119,19 +4128,22 @@ class App(QWidget):
             return ""
 
     def save_settings(self):
+        saved_idx = self.selected_monitor()
+        if 0 <= saved_idx < len(getattr(self, "monitors", [])) and self.monitors[saved_idx].get("kind") == "window":
+            saved_idx = 0
         data = {
             "nick": self.nick.get().strip(),
             "host": clean_host(self.host.get(), ""),
             "quality": self.selected_quality()[0],
             "fps": self.selected_quality()[4],
-            "monitor": self.selected_monitor(),
+            "monitor": saved_idx,
             "pc_audio": self.selected_pc_audio(),
             "mic": self.selected_mic(),
             "pc_volume": clamp_gain(self.pc_volume.get()) if hasattr(self, "pc_volume") else 100,
             "mic_volume": clamp_gain(self.mic_volume.get()) if hasattr(self, "mic_volume") else 100,
             "start_with_windows": bool(self.start_with_windows.get()),
         }
-        geom = valid_saved_geom(self._current_window_geom(), self.monitors)
+        geom = valid_saved_geom(self._current_window_geom(), getattr(self, "base_monitors", self.monitors))
         if geom:
             data["window_geom"] = geom
         with open(settings_path(), "w", encoding="utf-8") as handle:
@@ -3176,7 +4188,7 @@ class App(QWidget):
         self.button.config(text="Parar")
         self.set_status("Preparando a captura...")
         output_idx = self.selected_monitor()
-        pc_audio = self.selected_pc_audio()
+        pc_audio = self.effective_pc_audio(output_idx)
         mic = self.selected_mic()
         threading.Thread(target=self._run, args=(ffmpeg, nick, host, output_idx, pc_audio, mic), daemon=True).start()
 
@@ -3249,21 +4261,31 @@ class App(QWidget):
                     output_idx = 0
                 self._live_monitor = output_idx
                 monitor = self.monitors[output_idx]
+                if live_audio is not None:
+                    desired_pc = self.effective_pc_audio(output_idx)
+                    desired_mic = self.selected_mic()
+                    if desired_pc != getattr(live_audio, "pc_name", "") or desired_mic != getattr(live_audio, "mic_name", ""):
+                        try:
+                            live_audio.retarget(desired_pc, desired_mic)
+                        except Exception as error:
+                            log_event(f"falha retarget som {error}")
                 q_key, _q_label, width, height, fps = self._consume_quality_switch()
                 self._live_quality = q_key
                 order = [preferred, *[item for item in encoders if item != preferred]] if preferred else encoders
                 restarted = False
                 lost = False
+                is_window = monitor.get("kind") == "window"
                 for encoder in order:
                     if self.stopping:
                         return
-                    mode = self._capture_mode or "gdigrab"
+                    mode = "window" if is_window else (self._capture_mode or "gdigrab")
                     outcome = self._open_capture(
                         ffmpeg, mode, encoder, fps, monitor, output_idx, url,
                         live_audio, note, width, height,
                     )
                     if (
                         outcome is False
+                        and not is_window
                         and mode == "ddagrab"
                         and not self._frame_seen
                         and not self.stopping
@@ -3346,13 +4368,27 @@ class App(QWidget):
             except Exception:
                 pass
             self._screen_debounce_job = None
+        index = self.selected_monitor()
+        if 0 <= index < len(self.monitors) and hasattr(self, "pc_choice"):
+            mon = self.monitors[index]
+            cur_pc = self.pc_choice.get()
+            if mon.get("kind") == "window":
+                if cur_pc not in ("Sem som do PC", WINDOW_AUDIO_LABEL):
+                    self._last_speaker_label = cur_pc
+                if cur_pc != "Sem som do PC" and cur_pc != WINDOW_AUDIO_LABEL:
+                    self.pc_choice.set(WINDOW_AUDIO_LABEL)
+            else:
+                if cur_pc == WINDOW_AUDIO_LABEL:
+                    restore = getattr(self, "_last_speaker_label", "Sem som do PC")
+                    if restore not in self.pc_by_label and restore != "Sem som do PC":
+                        restore = "Sem som do PC"
+                    self.pc_choice.set(restore)
         try:
             self.save_settings()
         except Exception:
             pass
         if not self.running or self.stopping:
             return
-        index = self.selected_monitor()
         if index == getattr(self, "_live_monitor", None) and self._switch_to is None:
             return
         if not 0 <= index < len(self.monitors):
@@ -3422,6 +4458,13 @@ class App(QWidget):
         return proc.poll()
 
     def _kill_ffmpeg(self):
+        feeder = getattr(self, "_window_feeder", None)
+        self._window_feeder = None
+        if feeder is not None:
+            try:
+                feeder.close()
+            except Exception:
+                pass
         for proc in (getattr(self, "proc", None), getattr(self, "video_proc", None)):
             if proc is None or proc.poll() is not None:
                 continue
@@ -3503,21 +4546,40 @@ class App(QWidget):
         )
 
     def _open_capture(self, ffmpeg, mode, encoder, fps, monitor, output_idx, url, live_audio, note, width, height):
-        if live_audio is None:
-            command = build_command(
-                ffmpeg, mode, encoder, fps, monitor, output_idx, url, False, width, height,
-            )
-            return self._attempt(command, encoder, fps, mode, None, note, width, height)
         self._av_ticket += 1
-        port = 20000 + ((os.getpid() + self._av_ticket) % 20000)
-        relay = f"tcp://127.0.0.1:{port}"
-        pipe = rf"\\.\pipe\spartan-live-{os.getpid()}-{self._av_ticket}"
-        video = build_command(
-            ffmpeg, mode, encoder, fps, monitor, output_idx, url, True, width, height, relay,
-        )
-        return self._attempt_synced(
-            video, pipe, relay, url, encoder, fps, live_audio, note, width, height, mode,
-        )
+        mon = dict(monitor)
+        feeder = None
+        if mode == "window":
+            vpipe = rf"\\.\pipe\spartan-vid-{os.getpid()}-{self._av_ticket}"
+            mon["video_pipe"] = vpipe
+            feeder = WindowVideoFeeder(mon.get("hwnd", 0), vpipe, width, height, fps)
+            try:
+                feeder.open_pipe()
+            except OSError as error:
+                self.last_error = str(error)
+                log_event(f"cano do video {error}")
+                return False
+            self._window_feeder = feeder
+        try:
+            if live_audio is None:
+                command = build_command(
+                    ffmpeg, mode, encoder, fps, mon, output_idx, url, False, width, height,
+                )
+                return self._attempt(command, encoder, fps, mode, None, note, width, height)
+            port = 20000 + ((os.getpid() + self._av_ticket) % 20000)
+            relay = f"tcp://127.0.0.1:{port}"
+            pipe = rf"\\.\pipe\spartan-live-{os.getpid()}-{self._av_ticket}"
+            video = build_command(
+                ffmpeg, mode, encoder, fps, mon, output_idx, url, True, width, height, relay,
+            )
+            return self._attempt_synced(
+                video, pipe, relay, url, encoder, fps, live_audio, note, width, height, mode,
+            )
+        finally:
+            if feeder is not None:
+                feeder.close()
+                if getattr(self, "_window_feeder", None) is feeder:
+                    self._window_feeder = None
 
     def _attempt_synced(self, video_command, pipe_name, relay, rtmp, encoder, fps, live_audio, note, width, height, mode="gdigrab"):
         """A imagem é codificada sozinha. O som entra em seguida, na ordem da captura."""
@@ -3766,6 +4828,9 @@ class App(QWidget):
     def _audio_changed(self):
         if not getattr(self, "status", None):
             return
+        cur_pc = self.pc_choice.get() if hasattr(self, "pc_choice") else ""
+        if cur_pc not in ("Sem som do PC", WINDOW_AUDIO_LABEL) and cur_pc in self.pc_by_label:
+            self._last_speaker_label = cur_pc
         job = getattr(self, "_audio_debounce_job", None)
         if job:
             try:
@@ -3780,7 +4845,7 @@ class App(QWidget):
         audio = self.audio_live
         if not self.running or audio is None:
             return
-        target_pc = self.selected_pc_audio()
+        target_pc = self.effective_pc_audio()
         target_mic = self.selected_mic()
         if target_pc == getattr(audio, "pc_name", "") and target_mic == getattr(audio, "mic_name", ""):
             return
@@ -3794,7 +4859,7 @@ class App(QWidget):
         audio = self.audio_live
         if not self.running or audio is None:
             return
-        target_pc = self.selected_pc_audio()
+        target_pc = self.effective_pc_audio()
         target_mic = self.selected_mic()
         if target_pc == getattr(audio, "pc_name", "") and target_mic == getattr(audio, "mic_name", ""):
             return
