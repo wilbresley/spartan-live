@@ -75,7 +75,7 @@ cd publisher
 .\build.ps1
 ```
 
-`build.ps1` instala o empacotador, gera `publisher\dist\SpartanLive.exe` e grava o ícone do projeto. O `publish.json` entra no executável com o usuário e a senha de transmitir. O campo de servidor sai vazio.
+`build.ps1` instala o empacotador e o PySide6, gera `publisher\dist\SpartanLive.exe` e grava o ícone do projeto. O `publish.json` entra no executável com o usuário e a senha de transmitir. O campo de servidor sai vazio.
 
 `make_icon.py` regrava `assets\Spartan-Live.ico`. O build usa o ícone que já está no repositório.
 
@@ -90,7 +90,9 @@ O site entrega só esse arquivo, e só com sessão.
 
 ### Uso
 
-O programa pede apelido, servidor, monitor, som do PC, microfone e a qualidade. O padrão é 1080p 60. A janela tem 560×720, sem borda, e abre no centro do monitor principal.
+O programa pede apelido, servidor, monitor, som do PC, microfone e a qualidade. O padrão é 1080p 60. A janela é Qt 6 (PySide6), sem a barra do Windows, e abre em 560×720 no centro do monitor principal. Arrastar a faixa de cima move a janela. As bordas e os cantos redimensionam pelo próprio Windows. O botão maximizar guarda o tamanho anterior.
+
+Abaixo de 560×720 aparecem barras de rolagem independentes, vertical, horizontal ou as duas, afastadas da borda para o clique pegar a barra e não o redimensionamento. A roda do mouse rola na vertical. Shift e a roda rolam na horizontal. O volume do PC e o do microfone têm medidor. Trocar a qualidade com a live aberta reinicia só o encoder, no mesmo apelido. A página mostra "Trocando qualidade!" e segue na ponta.
 
 O apelido tem 2 a 24 caracteres: letras, números, `_` e `-`. Ele é o nome da live.
 
@@ -106,7 +108,7 @@ Minimizar vai para a bandeja. Parado, o ícone é `assets/Spartan-Live.ico`. Tra
 
 ### Codificação
 
-O encoder usado é o primeiro que responder, nesta ordem: `h264_nvenc`, `h264_amf`, `h264_qsv`, `libx264`. GOP igual à taxa de quadros, sem quadros B, CBR, `bufsize` com o dobro da taxa. No processador, o preset é `veryfast`, e `ultrafast` em 720p 60.
+O encoder usado é o primeiro que responder, nesta ordem: `h264_nvenc`, `h264_amf`, `h264_qsv`, `libx264`. GOP igual à taxa de quadros, sem quadros B, CBR, `bufsize` com o dobro da taxa. No processador, o preset é `veryfast`, e `ultrafast` em 720p 60 e 480p 30.
 
 | Qualidade | Placa | Processador |
 | --- | ---: | ---: |
@@ -114,8 +116,9 @@ O encoder usado é o primeiro que responder, nesta ordem: `h264_nvenc`, `h264_am
 | 1080p 30 | 8 Mbps | 8 Mbps |
 | 720p 60 | 8 Mbps | 6 Mbps |
 | 720p 30 | 5 Mbps | 4 Mbps |
+| 480p 30 | 1,5 Mbps | 1,5 Mbps |
 
-A tela entra por `gdigrab`, o monitor inteiro, com o cursor. O vídeo segue sozinho em MPEG-TS. O som do PC e o microfone são lidos no Windows, reamostrados com soxr para 48 kHz estéreo, somados em ponto flutuante e entregues em blocos de 20 ms. O segundo processo copia o vídeo e grava AAC a 256 kbps. O deslocamento na junção é zero.
+A tela entra pelo filtro `ddagrab`, o monitor inteiro, com o ponteiro real. Se essa captura não abrir, usa `gdigrab`. O vídeo segue sozinho em MPEG-TS. O som do PC e o microfone são lidos no Windows, reamostrados com soxr para 48 kHz estéreo, somados em ponto flutuante e entregues em blocos de 20 ms. O segundo processo copia o vídeo e grava AAC a 256 kbps. O deslocamento na junção é zero.
 
 O player usa `liveSyncDuration` 1.5, `maxLiveSyncPlaybackRate` 1 e `maxAudioFramesDrift` 10.
 
@@ -148,6 +151,10 @@ O proxy laranja do Cloudflare encaminha HTTP e HTTPS. RTMP continua no DNS diret
 
 A lista começa fechada. A escolha fica no navegador. Com a lista fechada, uma live nova abre a coluna por 10 segundos. Clique, tecla ou rolagem seguram a coluna aberta. A sala vazia fecha a coluna.
 
+Sem ninguém ao vivo, a área mostra um GIF triste, um de cada vez, entre os 12 de `site/public/gifs/sad-1.gif` a `sad-12.gif`. Quando entra uma live e a grade ainda está vazia, passa para um GIF feliz, entre os 12 de `happy-1.gif` a `happy-12.gif`. O navegador lembra o ponto da roleta.
+
+O botão de modo teatro, ou a tecla T, esconde o topo na hora. Com uma live tocando e o mouse parado por 30 segundos, o teatro entra sozinho. No teatro manual, encostar no topo mostra a faixa. Esc sai do teatro. O volume de cada apelido fica no navegador. O quadro mostra quantas pessoas estão assistindo. Picture-in-picture fica no controle do player.
+
 Um apelido na lista coloca o quadro parado. O vídeo só baixa no play. Clicar de novo no apelido, ou no X do quadro, remove o player. O X não encerra a transmissão.
 
 Uma live ocupa a área. Duas ou mais ficam em duas colunas iguais, com a imagem inteira no quadro. Clicar no quadro amplia. Clicar de novo, ou Esc, volta à grade. A grade e cada quadro têm tela cheia.
@@ -156,7 +163,7 @@ A reprodução começa muda. O volume vai de 0 a 100, de 5 em 5. Mutar guarda o 
 
 **Ao vivo** pula para a ponta. Fica verde com atraso de até 7 segundos e vermelho acima disso. Quem está tocando e passa de 90 segundos atrás volta para a ponta. Uma pausa de 5 minutos ou mais também recomece na ponta.
 
-Parar no programa, ou fechar a janela, avisa o servidor e o apelido sai na hora. Uma queda espera 90 segundos, com o quadro em "Offline. Aguardando a reconexão." Se a pessoa volta, o player reabre na ponta.
+Parar no programa, ou fechar a janela, avisa o servidor e o apelido sai na hora. Se a pessoa reabre a transmissão em até 1 minuto, quem já estava assistindo recebe o quadro de volta na grade com reprodução automática. Uma queda espera 90 segundos, com o quadro em "Offline. Aguardando a reconexão." Se a pessoa volta, o player reabre na ponta.
 
 Os sons de entrada e de saída tocam depois do login. A entrada marca uma live que começou. A saída marca uma parada, ou uma queda que passou de 90 segundos. Cada um espera 3 minutos antes de repetir o mesmo apelido. O botão em Ajustes liga e desliga os dois. Ajustes também troca a senha da página e baixa o programa.
 
@@ -179,5 +186,5 @@ python -m unittest test_spartan_live.py
 
 ```sh
 cd site
-node --test auth.test.mjs buffer.test.mjs password.test.mjs rail.test.mjs switch.test.mjs
+node --test auth.test.mjs buffer.test.mjs password.test.mjs quick-return.test.mjs rail.test.mjs switch.test.mjs theater.test.mjs
 ```

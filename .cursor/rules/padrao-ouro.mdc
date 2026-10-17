@@ -15,7 +15,7 @@ O usuário confirmou esta combinação: som limpo, live lisa e imagem sincroniza
 
 ## Som no programa (`publisher/spartan_live.py`)
 
-- Dois processos. A imagem (`gdigrab`) é codificada sozinha. O som entra depois pelo cano WAV. Este ffmpeg não tem wasapi nem ddagrab, e `-thread_queue_size` vale só no muxer. Não junte tela e som no mesmo processo. Não ponha `-thread_queue_size` antes de um `-i`.
+- Dois processos. A imagem é codificada sozinha. A captura é o filtro `ddagrab`, com o ponteiro real. Se ele não abrir, a imagem cai no `gdigrab`. O som entra depois pelo cano WAV. Este ffmpeg não tem wasapi, e `-thread_queue_size` vale só no muxer. Não junte tela e som no mesmo processo. Não ponha `-thread_queue_size` antes de um `-i`.
 - O mixer continua soxr VHQ, soma em float, e um buraco é silêncio (`next_chunk`). Sem `aresample=async`. Sem repetir o bloco anterior.
 - `plan_audio` entrega na ordem da captura. Silêncio só quando falta um bloco inteiro. Acima de 200 ms, o excesso antigo sai. O escritor não lê o relógio da imagem para cortar ou calar o som.
 - O metrônomo é `perf_counter`, em blocos de 20 ms. Na conexão ficam os últimos 40 ms e dois blocos de abertura.

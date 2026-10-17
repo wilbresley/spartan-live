@@ -5,6 +5,7 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { loadPassword, savePassword, verifyPassword } from "./password.mjs";
+import { countViewers, dropViewer, touchViewer } from "./public/theater.mjs";
 
 const PORT = Number(process.env.PORT || 8080);
 const VIEWER_USER = process.env.VIEWER_USER || "";
@@ -36,6 +37,7 @@ const thumbMiss = new Map();
 const fails = new Map();
 const stoppedUntil = new Map();
 const switchingUntil = new Map();
+const viewersByStream = new Map();
 let passwordRecord = null;
 
 function viewerRecord() {
@@ -56,12 +58,27 @@ const STATIC = {
   "/presence.mjs": { file: "presence.mjs", type: "text/javascript; charset=utf-8", cache: "no-cache" },
   "/rail-peek.mjs": { file: "rail-peek.mjs", type: "text/javascript; charset=utf-8", cache: "no-cache" },
   "/screen-switch.mjs": { file: "screen-switch.mjs", type: "text/javascript; charset=utf-8", cache: "no-cache" },
+  "/quick-return.mjs": { file: "quick-return.mjs", type: "text/javascript; charset=utf-8", cache: "no-cache" },
+  "/theater.mjs": { file: "theater.mjs", type: "text/javascript; charset=utf-8", cache: "no-cache" },
   "/style.css": { file: "style.css", type: "text/css; charset=utf-8", cache: "no-cache" },
   "/entrar.mp3": { file: "entrar.mp3", type: "audio/mpeg", cache: "public, max-age=86400" },
   "/sair.mp3": { file: "sair.mp3", type: "audio/mpeg", cache: "public, max-age=86400" },
   "/spartan-live.png": { file: "spartan-live.png", type: "image/png", cache: "public, max-age=86400" },
-  "/play.png": { file: "play.png", type: "image/png", cache: "public, max-age=86400" },
-  "/pause.png": { file: "pause.png", type: "image/png", cache: "public, max-age=86400" },
+  "/play.png": { file: "play.png", type: "image/png", cache: "no-cache" },
+  "/pause.png": { file: "pause.png", type: "image/png", cache: "no-cache" },
+  "/empty-sad.gif": { file: "empty-sad.gif", type: "image/gif", cache: "public, max-age=86400" },
+  ...Object.fromEntries(
+    Array.from({ length: 10 }, (_, idx) => [
+      `/gifs/sad-${idx + 1}.gif`,
+      { file: `gifs/sad-${idx + 1}.gif`, type: "image/gif", cache: "public, max-age=86400" },
+    ])
+  ),
+  ...Object.fromEntries(
+    Array.from({ length: 12 }, (_, idx) => [
+      `/gifs/happy-${idx + 1}.gif`,
+      { file: `gifs/happy-${idx + 1}.gif`, type: "image/gif", cache: "public, max-age=86400" },
+    ])
+  ),
   "/hls.min.js": { file: "hls.min.js", type: "text/javascript; charset=utf-8", cache: "public, max-age=86400" },
 };
 
@@ -465,6 +482,14 @@ export function collectSwitching(marks, streams, now = Date.now()) {
   return names;
 }
 
+export function collectSwitchKinds(marks) {
+  const kinds = {};
+  for (const [name, mark] of marks) {
+    if (mark?.kind) kinds[name] = mark.kind;
+  }
+  return kinds;
+}
+
 async function handleSwitch(req, res) {
   const body = await readJson(req);
   const name = String(body.name || "");
@@ -473,7 +498,8 @@ async function handleSwitch(req, res) {
     return;
   }
   const at = Date.now();
-  switchingUntil.set(name, { at, until: at + 20000 });
+  const kind = body.kind === "quality" ? "quality" : "screen";
+  switchingUntil.set(name, { at, until: at + 20000, kind });
   sendJson(res, 200, { ok: true });
 }
 
@@ -571,6 +597,17 @@ async function handle(req, res) {
     return;
   }
 
+  if (req.method === "POST" && pathname === "/api/viewers") {
+    const body = await readJson(req);
+    const name = String(body.name || "");
+    if (!publisherAllowed(body) || !safeStreamName(name)) {
+      sendJson(res, 401, { error: "nao autorizado" });
+      return;
+    }
+    sendJson(res, 200, { ok: true, viewers: countViewers(viewersByStream, name) });
+    return;
+  }
+
   if (req.method === "POST" && pathname === "/api/logout") {
     sendJson(res, 200, { ok: true }, { "set-cookie": cookieHeader("", req, true) });
     return;
@@ -592,6 +629,38 @@ async function handle(req, res) {
     return;
   }
 
+  if (req.method === "POST" && pathname === "/api/watch") {
+    if (!session) {
+      sendJson(res, 401, { error: "sem sessao" });
+      return;
+    }
+    const body = await readJson(req);
+    const names = Array.isArray(body.names) ? body.names : [];
+    const viewerKey = `${clientIp(req)}|${String(req.headers["user-agent"] || "").slice(0, 64)}`;
+    const now = Date.now();
+    for (const raw of names) {
+      const name = String(raw || "");
+      if (safeStreamName(name)) touchViewer(viewersByStream, name, viewerKey, now);
+    }
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/unwatch") {
+    if (!session) {
+      sendJson(res, 401, { error: "sem sessao" });
+      return;
+    }
+    const body = await readJson(req);
+    const name = String(body.name || "");
+    if (safeStreamName(name)) {
+      const viewerKey = `${clientIp(req)}|${String(req.headers["user-agent"] || "").slice(0, 64)}`;
+      dropViewer(viewersByStream, name, viewerKey);
+    }
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
   if (req.method === "GET" && pathname === "/api/streams") {
     if (!session) {
       sendJson(res, 401, { error: "sem sessao" });
@@ -604,13 +673,16 @@ async function handle(req, res) {
     const live = await listStreams();
     const stopped = currentStopped(live);
     const gone = new Set(stopped);
+    const now = Date.now();
     const streams = live.filter((stream) => !gone.has(stream.name)).map((stream) => ({
       ...stream,
       thumbAt: thumbStamp(stream.name),
+      viewers: countViewers(viewersByStream, stream.name, now),
     }));
     const switching = collectSwitching(switchingUntil, streams);
+    const switchingKinds = collectSwitchKinds(switchingUntil);
     sweepThumbs(streams.map((stream) => stream.name), switching);
-    sendJson(res, 200, { streams, stopped, switching });
+    sendJson(res, 200, { streams, stopped, switching, switchingKinds });
     return;
   }
 

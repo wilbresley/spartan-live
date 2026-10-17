@@ -5,22 +5,31 @@ import subprocess
 import tempfile
 import threading
 import time
-import tkinter as tk
 import unittest
 
 import numpy as np
 import soxr
+from PySide6.QtWidgets import QWidget
 
 from spartan_live import (
     App,
     Choice,
     LiveAudio,
+    _QtVar,
     apply_startup,
     build_command,
     build_mux_command,
     capture_stalled,
+    capture_input,
+    match_output_index,
+    prefer_capture,
     plan_audio,
     progress_seconds,
+    progress_speed,
+    network_slow_streak,
+    clamp_gain,
+    peak_level,
+    valid_saved_geom,
     video_clock,
     wav_header,
     downmix_float,
@@ -41,6 +50,9 @@ from spartan_live import (
     fit_icon_pixels,
     icon_content_box,
     presence_icon,
+    resize_hit_test,
+    scroll_bars_needed,
+    taskbar_exstyle,
     tray_action,
     startup_command,
     system_default_playback,
@@ -132,6 +144,10 @@ class PublisherTests(unittest.TestCase):
             "rtmp://servidor/nick",
         )
         self.assertIn("1920:1080", command[command.index("-filter:v") + 1])
+        self.assertIn("hwdownload", command[command.index("-filter:v") + 1])
+        self.assertIn("draw_mouse=1", " ".join(command))
+        self.assertIn("lavfi", command)
+        self.assertNotIn("gdigrab", command)
         self.assertIn("h264_nvenc", command)
         self.assertIn("-an", command)
         self.assertIn("14M", encoder_args("h264_nvenc", 60))
@@ -147,6 +163,7 @@ class PublisherTests(unittest.TestCase):
             0, "rtmp://servidor/nick", False, 1280, 720,
         )
         self.assertIn("1280:720", light[light.index("-filter:v") + 1])
+        self.assertNotIn("hwdownload", light[light.index("-filter:v") + 1])
         self.assertIn("4M", encoder_args("libx264", 30, 720))
         self.assertIn("6M", encoder_args("libx264", 60, 720))
         self.assertIn("ultrafast", encoder_args("libx264", 60, 720))
@@ -155,6 +172,25 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(command[-1], "rtmp://servidor/nick")
         self.assertNotIn("-thread_queue_size", command)
         self.assertNotIn("-fps_mode:v", command)
+
+    def test_ponteiro_usa_o_ddagrab_na_tela_certa(self):
+        self.assertEqual(prefer_capture(" .. ddagrab           |->V       Grab\n"), "ddagrab")
+        self.assertEqual(prefer_capture(" T. gdigrab\n"), "gdigrab")
+        self.assertEqual(prefer_capture(""), "gdigrab")
+        outputs = [
+            {"left": 0, "top": 0, "width": 1920, "height": 1080},
+            {"left": 1920, "top": 0, "width": 1920, "height": 1080},
+        ]
+        self.assertEqual(match_output_index({"left": 1920, "top": 0}, outputs), 1)
+        self.assertIsNone(match_output_index({"left": 5, "top": 5}, outputs))
+        command = capture_input(
+            "ddagrab", 60,
+            {"left": 1920, "top": 0, "width": 1920, "height": 1080, "output": 1},
+            0,
+        )
+        self.assertIn("output_idx=1", command[-1])
+        self.assertIn("draw_mouse=1", command[-1])
+        self.assertEqual(command[:3], ["-f", "lavfi", "-i"])
 
     def test_comando_com_som_do_pc(self):
         relay = "tcp://127.0.0.1:17961"
@@ -360,30 +396,34 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(run_with_timeout(lambda: "ok", 1), "ok")
 
     def test_lista_da_interface_e_escura(self):
-        root = tk.Tk()
-        root.withdraw()
+        Choice._ensure_app = None
+        from spartan_live import _ensure_qt_app
+        _ensure_qt_app()
+        root = QWidget()
         try:
-            variable = tk.StringVar(value="Alto-falantes")
+            variable = _QtVar("Alto-falantes")
             choice = Choice(root, variable, ["Alto-falantes", "Outro"], "#171717", "#1c1c1c", "#ececec", "#8d4545")
-            choice.pack()
-            root.update_idletasks()
+            choice.resize(300, 38)
             choice.redraw()
-            fills = [
-                choice.canvas.itemcget(item, "fill")
-                for item in choice.canvas.find_all()
-                if choice.canvas.type(item) == "polygon"
-            ]
-            self.assertIn("#1c1c1c", [fill.lower() for fill in fills])
+            self.assertEqual(choice.field.lower(), "#1c1c1c")
             choice.pick("Outro")
             self.assertEqual(variable.get(), "Outro")
             self.assertIsNone(choice.popup)
         finally:
-            root.destroy()
+            root.close()
 
     def test_janela_abre_no_centro_do_monitor_principal(self):
         self.assertEqual(center_on_workarea((0, 0, 1920, 1080), 560, 720), (680, 180))
         self.assertEqual(center_on_workarea((1920, 40, 3840, 1120), 560, 720), (2600, 220))
         self.assertEqual(center_on_workarea((10, 20, 100, 80), 560, 720), (10, 20))
+
+    def test_bandeja_tira_o_botao_da_barra_e_a_janela_aberta_devolve(self):
+        hidden = taskbar_exstyle(0x00040000, False)
+        self.assertFalse(hidden & 0x00040000)
+        self.assertTrue(hidden & 0x00000080)
+        shown = taskbar_exstyle(hidden, True)
+        self.assertTrue(shown & 0x00040000)
+        self.assertFalse(shown & 0x00000080)
 
     def test_clique_na_bandeja_abre_mesmo_com_o_numero_do_icone(self):
         self.assertEqual(tray_action(0x0202), "open")
@@ -547,10 +587,172 @@ class PublisherTests(unittest.TestCase):
             app.update()
             bottom = app.button.winfo_y() + app.button.winfo_height()
             self.assertGreater(app.button.winfo_height(), 30)
-            self.assertLessEqual(app.winfo_reqheight(), 720)
-            self.assertLessEqual(bottom, app.winfo_height())
+            self.assertLessEqual(app.content.winfo_reqheight(), 720 - 44)
+            self.assertLessEqual(bottom, app.content.winfo_height())
             self.assertLess(app.windows_check.winfo_y() + app.windows_check.winfo_height(), app.button.winfo_y())
             self.assertEqual(app.button.label, "Transmitir")
+            self.assertFalse(app.v_scroll.winfo_ismapped())
+            self.assertFalse(app.h_scroll.winfo_ismapped())
+            self.assertIn("480p30", app.quality_buttons)
+            self.assertEqual(app.quality_buttons["480p30"].label, "480p 30")
+            b480 = app.quality_buttons["480p30"]
+            b720_60 = app.quality_buttons["720p60"]
+            b720_30 = app.quality_buttons["720p30"]
+            self.assertGreater(b480.winfo_y(), b720_60.winfo_y())
+            self.assertGreaterEqual(b480.winfo_width(), b720_60.winfo_width() + b720_30.winfo_width())
+        finally:
+            app.destroy()
+
+    def test_qualidade_480p30_usa_bitrate_baixo(self):
+        self.assertEqual(parse_quality("480p30", 30), ("480p30", "480p 30", 854, 480, 30))
+        args = encoder_args("libx264", 30, 480)
+        self.assertIn("1500k", args)
+        self.assertIn("3000k", args)
+        self.assertIn("ultrafast", args)
+
+    def test_janela_encolhida_mostra_barras_independentes_sem_esmagar_conteudo(self):
+        self.assertEqual(scroll_bars_needed(560, 720, 558, 676), (False, False))
+        self.assertEqual(scroll_bars_needed(560, 400, 558, 676), (False, True))
+        self.assertEqual(scroll_bars_needed(350, 720, 558, 676), (True, False))
+        self.assertEqual(scroll_bars_needed(300, 300, 558, 676), (True, True))
+        self.assertEqual(resize_hit_test(2, 2, 560, 720), 13)
+        self.assertEqual(resize_hit_test(558, 718, 560, 720), 17)
+        self.assertEqual(resize_hit_test(280, 360, 560, 720), 0)
+        app = App()
+        try:
+            app.geometry("300x300+-2400+-2400")
+            app.update_idletasks()
+            app.update()
+            self.assertTrue(app.v_scroll.winfo_ismapped())
+            self.assertTrue(app.h_scroll.winfo_ismapped())
+            self.assertGreaterEqual(app.content.winfo_width(), 545)
+            vbar = app.scroll_area.verticalScrollBar()
+            hbar = app.scroll_area.horizontalScrollBar()
+            self.assertEqual(vbar.value(), 0)
+            self.assertEqual(hbar.value(), 0)
+            from PySide6.QtCore import QPoint, QPointF, Qt
+            from PySide6.QtGui import QWheelEvent
+            ev_down = QWheelEvent(
+                QPointF(100, 100), QPointF(100, 100), QPoint(0, 0), QPoint(0, -120),
+                Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False,
+            )
+            app.scroll_area.wheelEvent(ev_down)
+            self.assertGreater(vbar.value(), 0)
+            self.assertEqual(hbar.value(), 0)
+            ev_shift = QWheelEvent(
+                QPointF(100, 100), QPointF(100, 100), QPoint(0, 0), QPoint(0, -120),
+                Qt.MouseButton.NoButton, Qt.KeyboardModifier.ShiftModifier, Qt.ScrollPhase.NoScrollPhase, False,
+            )
+            app.scroll_area.wheelEvent(ev_shift)
+            self.assertGreater(hbar.value(), 0)
+            app.geometry("600x400+-2400+-2400")
+            app.update_idletasks()
+            app.update()
+            self.assertTrue(app.v_scroll.winfo_ismapped())
+            self.assertFalse(app.h_scroll.winfo_ismapped())
+            app.geometry("350x760+-2400+-2400")
+            app.update_idletasks()
+            app.update()
+            self.assertFalse(app.v_scroll.winfo_ismapped())
+            self.assertTrue(app.h_scroll.winfo_ismapped())
+            app.geometry("560x720+-2400+-2400")
+            app.update_idletasks()
+            app.update()
+            self.assertFalse(app.v_scroll.winfo_ismapped())
+            self.assertFalse(app.h_scroll.winfo_ismapped())
+        finally:
+            app.destroy()
+
+    def test_queda_do_video_no_jogo_nao_espera_5s_nem_manda_switch(self):
+        class FakeProc:
+            def __init__(self, code=None):
+                self.code = code
+                self.args = ["ffmpeg"]
+
+            def poll(self):
+                return self.code
+
+            def wait(self, timeout=None):
+                if self.code is None:
+                    raise subprocess.TimeoutExpired(self.args, timeout)
+                return self.code
+
+        dummy = type("Dummy", (), {})()
+        dummy.stopping = False
+        dummy._switch_to = None
+        dummy._switch_ready = False
+        dummy._frame_seen = 120
+        dummy._frame_at = time.perf_counter()
+        dummy.video_proc = FakeProc(code=1)
+        mux = FakeProc(code=None)
+        killed = []
+        dummy._kill_ffmpeg = lambda: (killed.append(True), setattr(mux, "code", 0))
+        started = time.perf_counter()
+        App._wait_proc(dummy, mux)
+        elapsed = time.perf_counter() - started
+        self.assertTrue(killed)
+        self.assertLess(elapsed, 0.5)
+
+    def test_volume_medidor_maximizar_e_aviso_de_rede(self):
+        self.assertEqual(clamp_gain(-10), 0)
+        self.assertEqual(clamp_gain(103), 105)
+        self.assertEqual(clamp_gain(180), 150)
+        mons = [{"left": 0, "top": 0, "width": 1920, "height": 1080}]
+        self.assertIsNone(valid_saved_geom("560x720+-2400+-2400", mons))
+        self.assertEqual(valid_saved_geom("560x720+100+100", mons), "560x720+100+100")
+        self.assertAlmostEqual(progress_speed("speed=0.82x"), 0.82)
+        self.assertIsNone(progress_speed("speed=N/A"))
+        streak = 0
+        for s in (0.80, 0.85, 0.79, 1.01, 0.82):
+            streak = network_slow_streak(streak, s)
+        self.assertEqual(streak, 1)
+        stereo = np.array([[0.5, -0.25]], np.float32)
+        self.assertGreater(peak_level(stereo), 0.5)
+        live = LiveAudio("pc", "mic", pc_gain=1.2, mic_gain=0.5)
+        self.assertAlmostEqual(live.pc_gain, 1.2, places=2)
+        self.assertAlmostEqual(live.mic_gain, 0.5, places=2)
+        live.set_gains(pc_gain=0.8, mic_gain=1.4, mic_muted=True)
+        self.assertAlmostEqual(live.pc_gain, 0.8, places=2)
+        self.assertAlmostEqual(live.mic_gain, 1.4, places=2)
+        self.assertTrue(live.mic_muted)
+        app = App()
+        try:
+            app.geometry("560x720+-2400+-2400")
+            app.update_idletasks()
+            app.update()
+            self.assertIsNotNone(getattr(app, "max_button", None))
+            self.assertIsNotNone(getattr(app, "pc_meter", None))
+            self.assertIsNotNone(getattr(app, "mic_meter", None))
+            app._toggle_maximize()
+            app.update_idletasks()
+            self.assertTrue(app._maximized)
+            self.assertEqual(app.max_button.cget("text"), "❐")
+            app._toggle_maximize()
+            app.update_idletasks()
+            self.assertFalse(app._maximized)
+            self.assertEqual(app.max_button.cget("text"), "□")
+            self.assertEqual(app.pc_meter.zero_btn.cget("text"), "0%")
+            self.assertEqual(app.pc_meter.hundred_btn.cget("text"), "100%")
+            app.pc_meter._set_exact(0)
+            self.assertEqual(app.pc_volume.get(), 0)
+            app.pc_meter._set_exact(100)
+            self.assertEqual(app.pc_volume.get(), 100)
+            ev_up = type("Ev", (), {"delta": 120})()
+            ev_dn = type("Ev", (), {"delta": -120})()
+            app.pc_meter._wheel(ev_up)
+            self.assertEqual(app.pc_volume.get(), 105)
+            app.pc_meter._wheel(ev_dn)
+            self.assertEqual(app.pc_volume.get(), 100)
+            app.running = True
+            app.stopping = False
+            app._live_quality = "1080p60"
+            announced = []
+            app._announce_switch = lambda ticket, kind="screen": announced.append((ticket, kind))
+            app.quality.set("720p30")
+            self.assertEqual(app._switch_quality, "720p30")
+            self.assertIn("Trocando a qualidade para 720p 30", app.status.cget("text"))
+            self.assertEqual(app._consume_quality_switch()[0], "720p30")
+            self.assertIsNone(app._switch_quality)
         finally:
             app.destroy()
 

@@ -1,8 +1,20 @@
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
-python -m pip install --user pyinstaller soxr numpy
-$extra = @()
+python -m pip install --user pyinstaller soxr numpy PySide6
+$extra = @(
+  "--exclude-module", "tkinter",
+  "--exclude-module", "PySide6.QtQml",
+  "--exclude-module", "PySide6.QtQuick",
+  "--exclude-module", "PySide6.QtQuickWidgets",
+  "--exclude-module", "PySide6.QtNetwork",
+  "--exclude-module", "PySide6.QtSql",
+  "--exclude-module", "PySide6.QtSvg",
+  "--exclude-module", "PySide6.QtPdf",
+  "--exclude-module", "PySide6.QtOpenGL",
+  "--exclude-module", "PySide6.QtDBus",
+  "--exclude-module", "PySide6.QtTest"
+)
 if (Test-Path "ffmpeg\LICENSE.txt") {
   $extra += "--add-data"
   $extra += "ffmpeg\LICENSE.txt;."

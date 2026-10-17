@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { screenPhase } from "./public/screen-switch.mjs";
-import { collectSwitching } from "./server.mjs";
+import { collectSwitching, collectSwitchKinds } from "./server.mjs";
 
 const entry = { name: "ana", offline: false, offlineAt: 0, switching: false };
 
@@ -40,9 +40,11 @@ test("o mesmo instante da live não reabre o player", () => {
 });
 
 test("o aviso some quando a live nova fica pronta", () => {
-  const marks = new Map([["ana", { at: 1_000, until: 30_000 }]]);
+  const marks = new Map([["ana", { at: 1_000, until: 30_000, kind: "quality" }]]);
   const hidden = collectSwitching(marks, [], 2_000);
   assert.deepEqual(hidden, ["ana"]);
+  assert.deepEqual(collectSwitchKinds(marks), { ana: "quality" });
   const gone = collectSwitching(marks, [{ name: "ana", readyTime: new Date(3_000).toISOString() }], 4_000);
   assert.deepEqual(gone, []);
+  assert.deepEqual(collectSwitchKinds(marks), {});
 });

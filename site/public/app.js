@@ -1,7 +1,22 @@
 import { formatOnAir, isFollowingLive, liveLedSynced, playbackGlitch, rewindWindow, shouldSnapToLive } from "./buffer-math.mjs";
 import { dueChimes, freshArrivals, nextPresence } from "./presence.mjs";
 import { peekSecondsLeft, railAfterEmpty, railAfterEnter, railAfterInteract, railAfterTick, railAfterToggle, visualRailOpen } from "./rail-peek.mjs";
+import { claimReturn, pruneReturns, rememberReturn } from "./quick-return.mjs";
 import { screenPhase } from "./screen-switch.mjs";
+import {
+  HAPPY_GIFS,
+  SAD_GIFS,
+  createTheaterState,
+  pickNextGif,
+  readPeerVolume,
+  savePeerVolume,
+  theaterActive,
+  theaterAfterEscape,
+  theaterAfterMove,
+  theaterAfterTick,
+  theaterAfterToggle,
+  theaterHeaderVisible,
+} from "./theater.mjs";
 
 const loginView = document.querySelector("#login-view");
 const passwordView = document.querySelector("#password-view");
@@ -20,12 +35,82 @@ const rail = document.querySelector("#live-rail");
 const peersEl = document.querySelector("#peers");
 const hiddenLives = document.querySelector("#hidden-lives");
 const empty = document.querySelector("#empty");
+const emptyGif = document.querySelector("#empty-gif");
+const emptyText = document.querySelector("#empty-text");
 const count = document.querySelector("#count");
 const logoutButton = document.querySelector("#logout");
+const theaterButton = document.querySelector("#theater-toggle");
+
+const SAD_INDEX_KEY = "spartan-live-sad-gif-idx";
+const HAPPY_INDEX_KEY = "spartan-live-happy-gif-idx";
+
+function readStoredGifIndex(key, total) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw === null) return Math.floor(Math.random() * total) - 1;
+    const parsed = Number.parseInt(raw, 10);
+    return Number.isInteger(parsed) ? parsed : -1;
+  } catch {
+    return -1;
+  }
+}
+
+function saveStoredGifIndex(key, index) {
+  try { localStorage.setItem(key, String(index)); } catch { /* sem armazenamento */ }
+}
+
+let sadGifIndex = readStoredGifIndex(SAD_INDEX_KEY, SAD_GIFS.length);
+let happyGifIndex = readStoredGifIndex(HAPPY_INDEX_KEY, HAPPY_GIFS.length);
+let currentEmptyMode = "";
+
+function advanceSadGif() {
+  const picked = pickNextGif(SAD_GIFS, sadGifIndex);
+  sadGifIndex = picked.index;
+  saveStoredGifIndex(SAD_INDEX_KEY, sadGifIndex);
+  currentEmptyMode = "sad";
+  if (emptyGif) {
+    emptyGif.classList.remove("is-broken");
+    emptyGif.src = picked.src;
+  }
+}
+
+function advanceHappyGif() {
+  const picked = pickNextGif(HAPPY_GIFS, happyGifIndex);
+  happyGifIndex = picked.index;
+  saveStoredGifIndex(HAPPY_INDEX_KEY, happyGifIndex);
+  currentEmptyMode = "happy";
+  if (emptyGif) {
+    emptyGif.classList.remove("is-broken");
+    emptyGif.src = picked.src;
+  }
+}
+
+if (emptyGif) {
+  emptyGif.addEventListener("error", () => emptyGif.classList.add("is-broken"));
+  emptyGif.addEventListener("load", () => emptyGif.classList.remove("is-broken"));
+  advanceSadGif();
+}
+
+const VOLUME_MAP_KEY = "spartan-live-peer-volumes";
+function loadVolumeMap() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(VOLUME_MAP_KEY) || "{}");
+    return raw && typeof raw === "object" ? raw : {};
+  } catch {
+    return {};
+  }
+}
+function persistVolumeMap(map) {
+  try { localStorage.setItem(VOLUME_MAP_KEY, JSON.stringify(map)); } catch { /* sem armazenamento */ }
+}
+let peerVolumes = loadVolumeMap();
+let hoveredPeer = null;
+let theaterState = createTheaterState();
 
 const peers = new Map();
 const catalog = new Map();
 let presence = { primed: false, people: {} };
+let returns = {};
 const CHIME_RECENT_KEY = "spartan-live-chime-recent";
 
 function loadChimeRecent() {
@@ -47,22 +132,55 @@ const CHIME_KEY = "spartan-live-chimes";
 let soundCtx = null;
 const soundBuffers = {};
 let soundLoading = null;
+let rawSoundBytes = null;
+let rawSoundPromise = null;
+let currentChimeSource = null;
+const chimeAudioEls = {
+  enter: typeof Audio !== "undefined" ? new Audio("/entrar.mp3") : null,
+  exit: typeof Audio !== "undefined" ? new Audio("/sair.mp3") : null,
+};
+for (const el of Object.values(chimeAudioEls)) {
+  if (el) el.preload = "auto";
+}
+
+function fetchRawSounds() {
+  if (rawSoundBytes) return Promise.resolve(rawSoundBytes);
+  if (rawSoundPromise) return rawSoundPromise;
+  rawSoundPromise = (async () => {
+    const out = {};
+    for (const [kind, url] of [["enter", "/entrar.mp3"], ["exit", "/sair.mp3"]]) {
+      const response = await fetch(url);
+      if (response.ok) out[kind] = await response.arrayBuffer();
+    }
+    rawSoundBytes = out;
+    return out;
+  })().catch(() => {
+    rawSoundPromise = null;
+    return null;
+  });
+  return rawSoundPromise;
+}
 
 function ensureSound() {
-  if (appView.classList.contains("hidden")) return null;
-  if (!soundCtx) soundCtx = new AudioContext();
+  if (!soundCtx && typeof AudioContext !== "undefined") soundCtx = new AudioContext();
   return soundCtx;
 }
 
 function loadSounds() {
   const ctx = ensureSound();
   if (!ctx) return Promise.resolve();
+  if (soundBuffers.enter && soundBuffers.exit) return Promise.resolve();
   if (soundLoading) return soundLoading;
   soundLoading = (async () => {
-    for (const [kind, url] of [["enter", "/entrar.mp3"], ["exit", "/sair.mp3"]]) {
-      const response = await fetch(url);
-      const bytes = await response.arrayBuffer();
-      soundBuffers[kind] = await ctx.decodeAudioData(bytes.slice(0));
+    const raw = await fetchRawSounds();
+    if (!raw) {
+      soundLoading = null;
+      return;
+    }
+    for (const kind of ["enter", "exit"]) {
+      if (raw[kind] && !soundBuffers[kind]) {
+        soundBuffers[kind] = await ctx.decodeAudioData(raw[kind].slice(0));
+      }
     }
   })().catch(() => {
     soundLoading = null;
@@ -72,12 +190,21 @@ function loadSounds() {
 
 function unlockSound() {
   const ctx = ensureSound();
-  if (!ctx) return;
-  if (ctx.state === "suspended") ctx.resume();
+  if (ctx && ctx.state === "suspended") {
+    ctx.resume().catch(() => {});
+  }
   loadSounds();
+  if (pendingChime && !chimeBusy) {
+    flushChime(Date.now());
+  }
 }
 
-document.addEventListener("pointerdown", unlockSound);
+for (const ev of ["pointerdown", "mousedown", "keydown", "touchstart", "click"]) {
+  document.addEventListener(ev, unlockSound, { passive: true });
+}
+window.addEventListener("focus", () => {
+  if (pendingChime && !chimeBusy) flushChime(Date.now());
+});
 
 function chimesEnabled() {
   try { return localStorage.getItem(CHIME_KEY) !== "off"; } catch { return true; }
@@ -91,14 +218,69 @@ function paintChimeButton() {
   button.classList.toggle("is-off", !on);
 }
 
-function playChime(kind) {
-  const buffer = soundBuffers[kind];
-  if (!chimesEnabled() || !buffer || !soundCtx || soundCtx.state !== "running") return false;
-  const source = soundCtx.createBufferSource();
-  source.buffer = buffer;
-  source.connect(soundCtx.destination);
-  source.start();
-  return true;
+function stopActiveChime() {
+  if (currentChimeSource) {
+    try { currentChimeSource.stop(); } catch { /* já parou */ }
+    currentChimeSource = null;
+  }
+  for (const other of Object.values(chimeAudioEls)) {
+    if (other && !other.paused) {
+      try {
+        other.pause();
+        other.currentTime = 0;
+      } catch { /* já parado */ }
+    }
+  }
+}
+
+async function playChime(kind) {
+  if (!chimesEnabled()) return false;
+  const el = chimeAudioEls[kind];
+  if (el) {
+    try {
+      stopActiveChime();
+      el.currentTime = 0;
+      await el.play();
+      return true;
+    } catch { /* fallback para AudioContext se bloqueado ou falhou */ }
+  }
+  const ctx = ensureSound();
+  if (ctx) {
+    if (ctx.state === "suspended") {
+      try {
+        await Promise.race([
+          ctx.resume(),
+          new Promise((_, reject) => setTimeout(reject, 120)),
+        ]);
+      } catch { /* ainda suspenso sem clique na página */ }
+    }
+    if (ctx.state === "running") {
+      try {
+        await Promise.race([
+          loadSounds(),
+          new Promise((_, reject) => setTimeout(reject, 400)),
+        ]);
+      } catch { /* segue */ }
+      const buffer = soundBuffers[kind];
+      if (buffer) {
+        try {
+          stopActiveChime();
+          const source = ctx.createBufferSource();
+          source.buffer = buffer;
+          source.connect(ctx.destination);
+          currentChimeSource = source;
+          source.onended = () => {
+            if (currentChimeSource === source) currentChimeSource = null;
+          };
+          source.start();
+          return true;
+        } catch {
+          return false;
+        }
+      }
+    }
+  }
+  return false;
 }
 
 let pendingChime = null;
@@ -106,7 +288,7 @@ let chimeBusy = false;
 
 function queueChime(kind, names) {
   if (appView.classList.contains("hidden") || !names.length || !chimesEnabled()) return;
-  pendingChime = { kind, names: names.slice() };
+  pendingChime = { kind, names: names.slice(), queuedAt: Date.now() };
 }
 
 async function flushChime(now) {
@@ -115,20 +297,27 @@ async function flushChime(now) {
     return;
   }
   if (!pendingChime || chimeBusy) return;
+  if (now - (pendingChime.queuedAt || now) > 15_000) {
+    pendingChime = null;
+    return;
+  }
   const job = pendingChime;
-  pendingChime = null;
   chimeBusy = true;
   try {
-    try { await loadSounds(); } catch { return; }
-    if (appView.classList.contains("hidden") || !soundCtx) return;
-    if (soundCtx.state !== "running") {
-      try { await soundCtx.resume(); } catch { return; }
+    if (appView.classList.contains("hidden")) {
+      pendingChime = null;
+      return;
     }
-    if (appView.classList.contains("hidden") || soundCtx.state !== "running") return;
     const due = dueChimes(job.names.map((name) => `${job.kind}:${name}`), chimeRecent, now);
-    if (!due.play.length) return;
-    rememberChimes(due.recent);
-    playChime(job.kind);
+    if (!due.play.length) {
+      if (pendingChime === job) pendingChime = null;
+      return;
+    }
+    const played = await playChime(job.kind);
+    if (played) {
+      rememberChimes(due.recent);
+      if (pendingChime === job) pendingChime = null;
+    }
   } finally {
     chimeBusy = false;
   }
@@ -156,6 +345,7 @@ function showApp() {
   loginView.classList.add("hidden");
   passwordView.classList.add("hidden");
   appView.classList.remove("hidden");
+  fetchRawSounds();
   unlockSound();
 }
 
@@ -188,9 +378,19 @@ function clearFocusMarks() {
 }
 
 function showVideo() {
-  const anyone = catalog.size > 0;
-  empty.classList.toggle("hidden", anyone);
-  videoContainer.classList.toggle("hidden", visibleCount() === 0);
+  const watching = visibleCount() > 0;
+  const anyoneOnline = [...catalog.values()].some((entry) => !entry.offline);
+  empty.classList.toggle("hidden", watching);
+  videoContainer.classList.toggle("hidden", !watching);
+  if (!watching) {
+    if (anyoneOnline) {
+      if (emptyText) emptyText.textContent = "Tem gente ao vivo! Escolha uma live ao lado para assistir.";
+      if (currentEmptyMode !== "happy") advanceHappyGif();
+    } else {
+      if (emptyText) emptyText.textContent = "Ninguém está transmitindo agora.";
+      if (currentEmptyMode !== "sad") advanceSadGif();
+    }
+  }
 }
 
 function resizePeers() {
@@ -282,7 +482,15 @@ function renderRail() {
   for (const entry of catalog.values()) {
     const button = document.createElement("button");
     button.type = "button";
-    button.textContent = entry.name;
+    const nameSpan = document.createElement("span");
+    nameSpan.textContent = entry.name;
+    button.append(nameSpan);
+    if (Number(entry.viewers) > 0) {
+      const badge = document.createElement("span");
+      badge.className = "rail-viewers";
+      badge.textContent = `👁 ${entry.viewers}`;
+      button.append(badge);
+    }
     if (peers.has(entry.name)) button.classList.add("on");
     if (entry.offline) button.classList.add("offline");
     button.addEventListener("click", () => toggleWatch(entry.name));
@@ -417,7 +625,7 @@ function bindPeerUi(peer, name) {
   });
   peer.el.addEventListener("click", (event) => {
     if (event.target.closest("button, .player-bar, .peer-actions")) return;
-    if (document.fullscreenElement) return;
+    if (document.fullscreenElement && document.fullscreenElement !== videoContainer) return;
     if (visibleCount() < 2) return;
     if (manualFocus === name) {
       manualFocus = null;
@@ -462,6 +670,8 @@ function addStream(stream) {
   actions.className = "peer-actions";
   const title = document.createElement("strong");
   title.textContent = stream.name;
+  const viewersBadge = document.createElement("span");
+  viewersBadge.className = "peer-viewers hidden";
   const close = document.createElement("button");
   close.type = "button";
   close.setAttribute("aria-label", "Parar de assistir");
@@ -502,6 +712,11 @@ function addStream(stream) {
   track.append(fill, thumb);
   pop.append(readout, track);
   volume.append(pop, volumeButton);
+  const snap = document.createElement("button");
+  snap.type = "button";
+  snap.className = "icon-btn";
+  snap.textContent = "📷";
+  snap.title = "Tirar print da live";
   const pip = document.createElement("button");
   pip.type = "button";
   pip.className = "icon-btn";
@@ -516,7 +731,7 @@ function addStream(stream) {
   onAir.className = "on-air";
   onAir.title = "Tempo no ar";
   onAir.textContent = "0:00";
-  bar.append(play, onAir, liveButton, volume, pip, fullscreen);
+  bar.append(play, onAir, liveButton, volume, snap, pip, fullscreen);
   const exitFs = document.createElement("button");
   exitFs.type = "button";
   exitFs.className = "fs-exit";
@@ -529,7 +744,8 @@ function addStream(stream) {
     window.clearTimeout(hideExit);
     hideExit = window.setTimeout(() => el.classList.remove("fs-hot"), 1400);
   }
-  let savedVolume = 100;
+  const initialVol = readPeerVolume(peerVolumes, stream.name);
+  let savedVolume = initialVol.step || 100;
   function volumeStep() {
     if (video.muted || video.volume === 0) return 0;
     return Math.max(0, Math.min(100, Math.round(video.volume * 20) * 5));
@@ -542,11 +758,15 @@ function addStream(stream) {
     track.setAttribute("aria-valuenow", String(step));
     volumeButton.textContent = step === 0 ? "🔇" : "🔊";
   }
-  function applyVolume(percent) {
+  function applyVolume(percent, remember = true) {
     const step = Math.max(0, Math.min(100, Math.round(Number(percent) / 5) * 5));
     if (step > 0) savedVolume = step;
-    video.volume = step / 100;
+    video.volume = (step > 0 ? step : savedVolume) / 100;
     video.muted = step === 0;
+    if (remember) {
+      peerVolumes = savePeerVolume(peerVolumes, stream.name, step > 0 ? step : savedVolume, step === 0);
+      persistVolumeMap(peerVolumes);
+    }
     paintSound();
   }
   function volumeFromPointer(event) {
@@ -606,6 +826,12 @@ function addStream(stream) {
       try { video.currentTime = edge; } catch { /* a live ainda está abrindo */ }
     }
     video.play().catch(() => {});
+    fetch("/api/watch", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ names: [stream.name] }),
+    }).catch(() => {});
     paintTime();
   }
   function resumePlayback() {
@@ -620,12 +846,24 @@ function addStream(stream) {
     peer.lastMove = Date.now();
     ensureLink();
     video.play().catch(() => {});
+    fetch("/api/watch", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ names: [stream.name] }),
+    }).catch(() => {});
   }
   play.addEventListener("click", () => {
     if (!video.paused) {
       pauseStarted = performance.now();
       peer.userPaused = true;
       video.pause();
+      fetch("/api/unwatch", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: stream.name }),
+      }).catch(() => {});
       return;
     }
     resumePlayback();
@@ -656,9 +894,38 @@ function addStream(stream) {
     else return;
     event.preventDefault();
   });
+  async function takeSnapshot() {
+    if (!video.videoWidth || !video.videoHeight) return;
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+    if (!blob) return;
+    try {
+      if (navigator.clipboard?.write && window.ClipboardItem) {
+        await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      }
+    } catch { /* também baixa o arquivo */ }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${stream.name}-${Date.now()}.png`;
+    a.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 5000);
+    snap.textContent = "✓";
+    window.setTimeout(() => { snap.textContent = "📷"; }, 1200);
+  }
+  snap.addEventListener("click", takeSnapshot);
   pip.addEventListener("click", () => {
-    if (document.pictureInPictureElement === video) document.exitPictureInPicture().catch(() => {});
-    else video.requestPictureInPicture().catch(() => {});
+    if (document.pictureInPictureElement === video) {
+      document.exitPictureInPicture().catch(() => {});
+      return;
+    }
+    if (!peer.started) resumePlayback();
+    video.requestPictureInPicture().catch(() => {});
   });
   fullscreen.addEventListener("click", () => {
     if (document.fullscreenElement === el) document.exitFullscreen();
@@ -724,14 +991,41 @@ function addStream(stream) {
     offline: false, offlineAt: 0, switching: false, lastTime: 0, lastMove: Date.now(), moves: 0,
     highTime: 0, glitchAt: 0,
     started: false, name: stream.name, readyAt: catalog.get(stream.name)?.readyAt || Date.now(),
-    poster, posterStamp,
+    poster, posterStamp, viewersBadge, switchNote,
+    toggleMute() {
+      if (video.muted || video.volume === 0) applyVolume(savedVolume || 100);
+      else applyVolume(0);
+    },
+    togglePlay() {
+      if (!video.paused) {
+        pauseStarted = performance.now();
+        peer.userPaused = true;
+        video.pause();
+        fetch("/api/unwatch", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: stream.name }),
+        }).catch(() => {});
+      } else {
+        resumePlayback();
+      }
+    },
+    toggleFullscreen() {
+      if (document.fullscreenElement === el) document.exitFullscreen();
+      else el.requestFullscreen();
+    },
+    goLive,
+    takeSnapshot,
   };
   mediaLink = { peer, hls: null };
+  el.addEventListener("pointerenter", () => { hoveredPeer = peer; });
+  el.addEventListener("pointerleave", () => { if (hoveredPeer === peer) hoveredPeer = null; });
   close.addEventListener("click", () => {
     removeStream(stream.name);
     refreshGrid();
   });
-  actions.append(title, close);
+  actions.append(title, viewersBadge, close);
   el.append(video, poster, feeder, offlineNote, switchNote, bigPlay, actions, bar, exitFs);
   peersEl.append(el);
   let link = null;
@@ -781,6 +1075,8 @@ function addStream(stream) {
   });
   const clock = window.setInterval(paintOn, 1000);
   video.pause();
+  peer.resume = resumePlayback;
+  peer.applyVolume = applyVolume;
   peer.stop = () => {
     window.clearInterval(clock);
     if (document.pictureInPictureElement === video) document.exitPictureInPicture().catch(() => {});
@@ -798,12 +1094,33 @@ function addStream(stream) {
   bindPeerUi(peer, stream.name);
 }
 
+function watchSnapshot(peer) {
+  const video = peer.video;
+  return {
+    playing: Boolean(peer.started && !peer.userPaused && video && !video.paused),
+    volume: video ? video.volume : 0,
+    muted: Boolean(video && (video.muted || video.volume === 0)),
+  };
+}
+
+function dropWatched(name, now) {
+  const peer = peers.get(name);
+  if (peer) returns = rememberReturn(returns, name, watchSnapshot(peer), now);
+  removeStream(name);
+}
+
 function removeStream(name) {
   const peer = peers.get(name);
   if (!peer) return;
   peer.stop();
   peer.el.remove();
   peers.delete(name);
+  fetch("/api/unwatch", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name }),
+  }).catch(() => {});
   if (manualFocus === name) manualFocus = null;
   if (document.fullscreenElement === videoContainer && visibleCount() === 0) {
     document.exitFullscreen().catch(() => {});
@@ -811,14 +1128,19 @@ function removeStream(name) {
 }
 
 function stopAll() {
+  returns = {};
   for (const name of [...peers.keys()]) removeStream(name);
   refreshGrid();
 }
 
 const OFFLINE_WAIT_MS = 90000;
 
-function markSwitch(peer) {
-  if (!peer || peer.switching) return;
+function markSwitch(peer, kind = "screen") {
+  if (!peer) return;
+  if (peer.switchNote) {
+    peer.switchNote.textContent = kind === "quality" ? "Trocando qualidade!" : "Trocando tela!";
+  }
+  if (peer.switching) return;
   peer.switching = true;
   peer.el.classList.remove("is-offline");
   peer.el.classList.add("is-switching");
@@ -878,43 +1200,50 @@ async function refresh() {
     const known = new Set(catalog.keys());
     const stopped = new Set(data.stopped || []);
     const switching = new Set(data.switching || []);
+    const switchingKinds = data.switchingKinds || {};
     const liveNames = data.streams.map((stream) => stream.name).filter((name) => !stopped.has(name));
     const presentNames = [...new Set([...liveNames, ...switching])];
     const step = nextPresence(presence, presentNames, [...stopped], Date.now());
     const arrived = freshArrivals(step.enter, known);
     presence = { primed: step.primed, people: step.people };
     const now = Date.now();
-    if (arrived.length) noteRailEnter(now);
     const readyAt = new Map(data.streams.map((stream) => [stream.name, Date.parse(stream.readyTime || "")]));
     const thumbAt = new Map(data.streams.map((stream) => [stream.name, Number(stream.thumbAt) || 0]));
+    const viewersMap = new Map(data.streams.map((stream) => [stream.name, Number(stream.viewers) || 0]));
     for (const name of stopped) {
       catalog.delete(name);
-      removeStream(name);
+      dropWatched(name, now);
     }
     const live = new Set(liveNames);
     const seen = new Set([...live, ...switching, ...catalog.keys()]);
     for (const name of seen) {
       if (stopped.has(name)) continue;
-      const current = catalog.get(name) || { name, offline: false, offlineAt: 0, switching: false };
+      const current = catalog.get(name) || { name, offline: false, offlineAt: 0, switching: false, viewers: 0 };
       const previousReady = current.readyAt;
       if (Number.isFinite(readyAt.get(name))) current.readyAt = readyAt.get(name);
       if (thumbAt.get(name)) current.thumbAt = thumbAt.get(name);
+      const viewers = viewersMap.get(name) || 0;
       const phase = screenPhase(current, live.has(name), switching.has(name), now, OFFLINE_WAIT_MS, previousReady);
       if (phase.action === "drop") {
         catalog.delete(name);
-        removeStream(name);
+        dropWatched(name, now);
         continue;
       }
       if (!catalog.has(name) && !live.has(name) && !switching.has(name)) continue;
+      phase.entry.viewers = viewers;
       catalog.set(name, phase.entry);
       const peer = peers.get(name);
       if (Number.isFinite(phase.entry.readyAt) && peer) peer.readyAt = phase.entry.readyAt;
+      if (peer?.viewersBadge) {
+        peer.viewersBadge.textContent = viewers > 0 ? `👁 ${viewers}` : "";
+        peer.viewersBadge.classList.toggle("hidden", viewers <= 0);
+      }
       const posterStamp = Number(phase.entry.thumbAt) || 0;
       if (peer?.poster && posterStamp && peer.posterStamp !== posterStamp) {
         peer.posterStamp = posterStamp;
         peer.poster.src = `/api/thumb/${encodeURIComponent(name)}?t=${posterStamp}`;
       }
-      if (phase.action === "switch") markSwitch(peer);
+      if (phase.action === "switch") markSwitch(peer, switchingKinds[name]);
       else if (phase.action === "revive") {
         clearSwitch(peer);
         if (peer?.revive) peer.revive();
@@ -926,11 +1255,44 @@ async function refresh() {
         noteProgress(peer);
       }
     }
+    returns = pruneReturns(returns, now);
+    const resumed = new Set();
+    for (const name of liveNames) {
+      if (stopped.has(name) || peers.has(name)) continue;
+      const claim = claimReturn(returns, name, now);
+      returns = claim.memory;
+      if (!claim.back) continue;
+      resumed.add(name);
+      addStream({ name });
+      const peer = peers.get(name);
+      if (!peer?.applyVolume) continue;
+      peer.applyVolume(claim.back.muted ? 0 : claim.back.volume * 100);
+      if (claim.back.playing && peer.resume) peer.resume();
+    }
+    const newcomers = arrived.filter((name) => !resumed.has(name));
+    if (newcomers.length) {
+      noteRailEnter(now);
+      if (visibleCount() === 0) advanceHappyGif();
+    }
     if (railHadNames && catalog.size === 0) noteRailEmpty();
     railHadNames = catalog.size > 0;
     refreshGrid();
+    const watchingNames = [];
+    for (const [name, peer] of peers) {
+      if (!peer.hidden && peer.started && !peer.userPaused && peer.video && !peer.video.paused) {
+        watchingNames.push(name);
+      }
+    }
+    if (watchingNames.length) {
+      fetch("/api/watch", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ names: watchingNames }),
+      }).catch(() => {});
+    }
     if (step.exit.length) queueChime("exit", step.exit);
-    else queueChime("enter", arrived);
+    else queueChime("enter", newcomers);
     await flushChime(now);
   } catch (error) {
     if (error.mustChange) {
@@ -959,17 +1321,118 @@ async function changePassword(form, errorEl) {
   form.reset();
 }
 
+function anyPlayingPeer() {
+  for (const peer of peers.values()) {
+    if (!peer.hidden && peer.started && !peer.userPaused && peer.video && !peer.video.paused) return true;
+  }
+  return false;
+}
+
+function activeKeyboardPeer() {
+  if (hoveredPeer && !hoveredPeer.hidden) return hoveredPeer;
+  if (manualFocus && peers.get(manualFocus) && !peers.get(manualFocus).hidden) return peers.get(manualFocus);
+  const list = visiblePeers();
+  return list.length === 1 ? list[0] : list[0] || null;
+}
+
+function paintTheater() {
+  const on = theaterActive(theaterState);
+  const peek = theaterHeaderVisible(theaterState);
+  appView.classList.toggle("theater-mode", on);
+  appView.classList.toggle("theater-peek", on && peek);
+  if (theaterButton) {
+    theaterButton.classList.toggle("is-on", on);
+    theaterButton.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+  if (on && !settingsPop.classList.contains("hidden") && !peek) {
+    settingsPop.classList.add("hidden");
+  }
+}
+
+if (theaterButton) {
+  theaterButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    theaterState = theaterAfterToggle(theaterState, Date.now());
+    paintTheater();
+  });
+}
+
+document.addEventListener("mousemove", (event) => {
+  if (appView.classList.contains("hidden")) return;
+  const next = theaterAfterMove(theaterState, event.clientY, Date.now(), 58);
+  if (
+    next.manual !== theaterState.manual ||
+    next.auto !== theaterState.auto ||
+    next.peek !== theaterState.peek
+  ) {
+    theaterState = next;
+    paintTheater();
+  } else {
+    theaterState = next;
+  }
+});
+
+window.setInterval(() => {
+  if (appView.classList.contains("hidden")) return;
+  const next = theaterAfterTick(theaterState, anyPlayingPeer(), Date.now());
+  if (next.auto !== theaterState.auto || next.manual !== theaterState.manual) {
+    theaterState = next;
+    paintTheater();
+  } else {
+    theaterState = next;
+  }
+}, 1000);
+
+document.addEventListener("visibilitychange", () => {
+  document.body.classList.toggle("tab-hidden", document.hidden);
+});
+
 document.addEventListener("keydown", (event) => {
-  if (event.key !== "Escape") return;
-  if (document.fullscreenElement) return;
-  if (visibleCount() <= 1) return;
-  if (!manualFocus) return;
-  manualFocus = null;
-  autoFocus = false;
-  videoContainer.classList.remove("peer-focus-mode");
-  delete videoContainer.dataset.spartanAutoFocus;
-  clearFocusMarks();
-  resizePeers();
+  if (appView.classList.contains("hidden")) return;
+  const tag = event.target instanceof Element ? event.target.tagName : "";
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+  if (event.ctrlKey || event.altKey || event.metaKey) return;
+
+  if (event.key === "Escape") {
+    if (document.fullscreenElement) return;
+    if (theaterActive(theaterState)) {
+      theaterState = theaterAfterEscape(theaterState, Date.now());
+      paintTheater();
+      return;
+    }
+    if (visibleCount() <= 1 || !manualFocus) return;
+    manualFocus = null;
+    autoFocus = false;
+    videoContainer.classList.remove("peer-focus-mode");
+    delete videoContainer.dataset.spartanAutoFocus;
+    clearFocusMarks();
+    resizePeers();
+    return;
+  }
+
+  if (event.key === "t" || event.key === "T") {
+    event.preventDefault();
+    theaterState = theaterAfterToggle(theaterState, Date.now());
+    paintTheater();
+    return;
+  }
+
+  const target = activeKeyboardPeer();
+  if (!target) return;
+  if (event.key === "m" || event.key === "M") {
+    event.preventDefault();
+    target.toggleMute?.();
+  } else if (event.key === "f" || event.key === "F") {
+    event.preventDefault();
+    target.toggleFullscreen?.();
+  } else if (event.key === " ") {
+    if (event.target instanceof Element && event.target.closest("button")) return;
+    event.preventDefault();
+    target.togglePlay?.();
+  } else if (event.key === "ArrowRight") {
+    event.preventDefault();
+    target.goLive?.();
+  }
 });
 
 loginForm.addEventListener("submit", async (event) => {

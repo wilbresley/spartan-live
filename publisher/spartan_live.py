@@ -14,10 +14,14 @@ import threading
 import time
 import urllib.request
 import winreg
-import tkinter as tk
-from tkinter import font as tkfont
-from tkinter import messagebox
 from urllib.parse import quote
+
+from PySide6.QtCore import Qt, QTimer, QRectF, QPoint, QEvent, QObject, QSize, Signal
+from PySide6.QtGui import QPainter, QColor, QPen, QFont, QFontMetrics, QPainterPath, QIcon, QCursor
+from PySide6.QtWidgets import (
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QLabel, QLineEdit, QCheckBox, QScrollArea, QFrame, QMessageBox,
+)
 
 import numpy as np
 import soxr
@@ -45,6 +49,7 @@ def existing_file(*names):
     folders = [
         app_dir(),
         bundle_dir(),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg"),
         os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets")),
     ]
     for folder in folders:
@@ -166,7 +171,7 @@ def looks_like_ip(host):
 
 def notify_targets(host, action):
     text = clean_host(host, "")
-    if action not in ("stop", "claim", "switch", "thumb") or not text:
+    if action not in ("stop", "claim", "switch", "thumb", "viewers") or not text:
         return []
     local = f"http://{text}:8097/api/{action}"
     if looks_like_ip(text):
@@ -174,11 +179,14 @@ def notify_targets(host, action):
     return [f"https://{text}/api/{action}", local]
 
 
-def notify_publisher(host, nick, user, password, action):
+def notify_publisher(host, nick, user, password, action, extra=None):
     targets = notify_targets(host, action)
     if not targets or not nick or not user or not password:
         return
-    body = json.dumps({"name": nick, "user": user, "password": password}).encode("utf-8")
+    payload = {"name": nick, "user": user, "password": password}
+    if isinstance(extra, dict):
+        payload.update(extra)
+    body = json.dumps(payload).encode("utf-8")
     last_error = "falhou"
     for url in targets:
         request = urllib.request.Request(
@@ -268,6 +276,27 @@ def upload_thumb(host, nick, user, password, data):
     log_event(f"thumb falhou apelido={nick} {last}")
 
 
+def fetch_viewers(host, nick, user, password):
+    targets = notify_targets(host, "viewers")
+    if not targets or not nick or not user or not password:
+        return 0
+    payload = json.dumps({"name": nick, "user": user, "password": password}).encode("utf-8")
+    for url in targets:
+        request = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=3) as response:
+                body = json.loads(response.read().decode("utf-8", "replace"))
+            return max(0, int(body.get("viewers") or 0))
+        except Exception:
+            continue
+    return 0
+
+
 class _JobBasicLimit(ctypes.Structure):
     _fields_ = [
         ("PerProcessUserTimeLimit", ctypes.c_int64),
@@ -337,6 +366,122 @@ def valid_nick(nick):
     return all(ch.isalnum() or ch in "_-" for ch in nick)
 
 
+class _GUID(ctypes.Structure):
+    _fields_ = [
+        ("Data1", ctypes.c_uint32),
+        ("Data2", ctypes.c_uint16),
+        ("Data3", ctypes.c_uint16),
+        ("Data4", ctypes.c_ubyte * 8),
+    ]
+
+
+class _DXGI_RECT(ctypes.Structure):
+    _fields_ = [
+        ("left", ctypes.c_long),
+        ("top", ctypes.c_long),
+        ("right", ctypes.c_long),
+        ("bottom", ctypes.c_long),
+    ]
+
+
+class _DXGI_OUTPUT_DESC(ctypes.Structure):
+    _fields_ = [
+        ("DeviceName", ctypes.c_wchar * 32),
+        ("DesktopCoordinates", _DXGI_RECT),
+        ("AttachedToDesktop", ctypes.c_int),
+        ("Rotation", ctypes.c_uint),
+        ("Monitor", ctypes.c_void_p),
+    ]
+
+
+def _guid(value):
+    text = value.replace("-", "")
+    tail = bytes.fromhex(text[16:])
+    return _GUID(
+        int(text[0:8], 16),
+        int(text[8:12], 16),
+        int(text[12:16], 16),
+        (ctypes.c_ubyte * 8)(*tail),
+    )
+
+
+def _com(ptr, index, restype, *argtypes):
+    table = ctypes.cast(ptr, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+    proto = ctypes.WINFUNCTYPE(restype, ctypes.c_void_p, *argtypes)
+    return proto(table[index])
+
+
+def _release(ptr):
+    if ptr:
+        _com(ptr, 2, ctypes.c_ulong)(ptr)
+
+
+def _dxgi_outputs():
+    dxgi = ctypes.WinDLL("dxgi")
+    factory = ctypes.c_void_p()
+    iid = _guid("770aae78-f26f-4dba-a829-253c83d1b387")
+    if dxgi.CreateDXGIFactory1(ctypes.byref(iid), ctypes.byref(factory)) < 0 or not factory.value:
+        return []
+    outputs = []
+    try:
+        for adapter_index in range(16):
+            adapter = ctypes.c_void_p()
+            if _com(factory, 7, ctypes.c_long, ctypes.c_uint, ctypes.POINTER(ctypes.c_void_p))(
+                factory, adapter_index, ctypes.byref(adapter),
+            ) < 0 or not adapter.value:
+                break
+            try:
+                for output_index in range(16):
+                    output = ctypes.c_void_p()
+                    if _com(adapter, 7, ctypes.c_long, ctypes.c_uint, ctypes.POINTER(ctypes.c_void_p))(
+                        adapter, output_index, ctypes.byref(output),
+                    ) < 0 or not output.value:
+                        break
+                    try:
+                        desc = _DXGI_OUTPUT_DESC()
+                        if _com(output, 7, ctypes.c_long, ctypes.POINTER(_DXGI_OUTPUT_DESC))(
+                            output, ctypes.byref(desc),
+                        ) < 0 or not desc.AttachedToDesktop:
+                            continue
+                        box = desc.DesktopCoordinates
+                        outputs.append({
+                            "left": int(box.left),
+                            "top": int(box.top),
+                            "width": int(box.right - box.left),
+                            "height": int(box.bottom - box.top),
+                        })
+                    finally:
+                        _release(output)
+            finally:
+                _release(adapter)
+    finally:
+        _release(factory)
+    return outputs
+
+
+def list_dxgi_outputs():
+    try:
+        return _dxgi_outputs()
+    except Exception:
+        return []
+
+
+def match_output_index(monitor, outputs):
+    left = int(monitor["left"])
+    top = int(monitor["top"])
+    for index, output in enumerate(outputs or []):
+        if int(output["left"]) == left and int(output["top"]) == top:
+            return index
+    return None
+
+
+def capture_output_index(monitor, output_idx):
+    found = monitor.get("output") if isinstance(monitor, dict) else None
+    if isinstance(found, int) and not isinstance(found, bool) and found >= 0:
+        return found
+    return int(output_idx)
+
+
 def list_monitors():
     user32 = ctypes.windll.user32
     try:
@@ -368,6 +513,10 @@ def list_monitors():
     user32.EnumDisplayMonitors(None, None, callback, 0)
     if not monitors:
         monitors.append({"left": 0, "top": 0, "width": 1920, "height": 1080})
+    outputs = list_dxgi_outputs()
+    for index, monitor in enumerate(monitors):
+        found = match_output_index(monitor, outputs)
+        monitor["output"] = index if found is None else found
     return monitors
 
 
@@ -383,6 +532,7 @@ QUALITY_OPTIONS = (
     ("1080p30", "1080p 30", 1920, 1080, 30),
     ("720p60", "720p 60", 1280, 720, 60),
     ("720p30", "720p 30", 1280, 720, 30),
+    ("480p30", "480p 30", 854, 480, 30),
 )
 
 
@@ -402,38 +552,65 @@ def parse_quality(value, fps=None):
 def encoder_args(encoder, fps, height=1080):
     gop = str(fps)
     hardware = encoder != "libx264"
-    if int(height) <= 720:
+    if int(height) <= 480:
+        limit = "1500k"
+        window = "3000k"
+    elif int(height) <= 720:
         rate = (8 if fps >= 60 else 5) if hardware else (6 if fps >= 60 else 4)
+        limit = f"{rate}M"
+        window = f"{rate * 2}M"
     else:
         rate = (14 if fps >= 60 else 8) if hardware else (12 if fps >= 60 else 8)
-    bitrate = f"{rate}M"
-    common = ["-b:v", bitrate, "-maxrate", bitrate, "-bufsize", f"{rate * 2}M", "-g", gop, "-bf", "0", "-pix_fmt", "yuv420p"]
+        limit = f"{rate}M"
+        window = f"{rate * 2}M"
+    common = ["-b:v", limit, "-maxrate", limit, "-bufsize", window, "-g", gop, "-bf", "0", "-pix_fmt", "yuv420p"]
     if encoder == "h264_nvenc":
         return ["-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq", "-rc", "cbr", "-profile:v", "high", *common]
     if encoder == "h264_amf":
         return ["-c:v", "h264_amf", "-quality", "quality", "-rc", "cbr", *common]
     if encoder == "h264_qsv":
         return ["-c:v", "h264_qsv", "-preset", "medium", "-profile:v", "high", *common]
-    preset = "ultrafast" if int(height) <= 720 and fps >= 60 else "veryfast"
+    preset = "ultrafast" if (int(height) <= 480 or (int(height) <= 720 and fps >= 60)) else "veryfast"
     return ["-c:v", "libx264", "-preset", preset, "-tune", "zerolatency", "-profile:v", "high", *common]
 
 
-def scale_filter(width=1920, height=1080):
-    return (
+def scale_filter(width=1920, height=1080, mode="gdigrab"):
+    scale = (
         f"scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos,"
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p"
     )
+    if mode == "ddagrab":
+        return f"hwdownload,format=bgra,{scale}"
+    return scale
+
+
+def prefer_capture(filter_listing):
+    for line in (filter_listing or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == "ddagrab":
+            return "ddagrab"
+    return "gdigrab"
+
+
+def ffmpeg_filters(ffmpeg):
+    try:
+        done = subprocess.run(
+            [ffmpeg, "-hide_banner", "-filters"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return f"{done.stdout or ''}\n{done.stderr or ''}"
 
 
 def capture_input(mode, fps, monitor, output_idx):
     if mode == "ddagrab":
-        return [
-            "-f", "ddagrab",
-            "-framerate", str(fps),
-            "-draw_mouse", "1",
-            "-output_idx", str(output_idx),
-            "-i", "desktop",
-        ]
+        index = capture_output_index(monitor, output_idx)
+        spec = f"ddagrab=output_idx={index}:framerate={int(fps)}:draw_mouse=1"
+        return ["-f", "lavfi", "-i", spec]
     return [
         "-f", "gdigrab",
         "-framerate", str(fps),
@@ -483,6 +660,37 @@ def progress_seconds(line):
     return None
 
 
+def progress_speed(line):
+    """Velocidade real de codificação/envio lida do progresso do ffmpeg (ex.: '0.82x' -> 0.82)."""
+    text = (line or "").strip()
+    if not text.startswith("speed="):
+        return None
+    raw = text.split("=", 1)[1].strip().rstrip("xX")
+    if not raw or raw.upper() == "N/A":
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def network_slow_streak(streak, speed, threshold=0.88):
+    if speed is None:
+        return streak
+    return streak + 1 if float(speed) < threshold else 0
+
+
+def clamp_gain(percent):
+    return max(0, min(150, int(round(float(percent) / 5.0) * 5)))
+
+
+def peak_level(stereo):
+    if stereo is None or len(stereo) == 0:
+        return 0.0
+    peak = float(np.max(np.abs(stereo)))
+    return min(1.0, max(0.0, peak * 1.8))
+
+
 def plan_audio(buf, limit, chunk):
     """O som sai na ordem em que chegou. Acima do limite, o excesso antigo sai. Sem um bloco inteiro, o buraco é silêncio."""
     if limit < chunk:
@@ -522,7 +730,7 @@ def build_command(ffmpeg, mode, encoder, fps, monitor, output_idx, rtmp, with_au
         command.append("1")
     command += [
         *capture_input(mode, fps, monitor, output_idx),
-        "-filter:v", scale_filter(width, height),
+        "-filter:v", scale_filter(width, height, mode),
         *encoder_args(encoder, fps, height),
     ]
     if with_audio:
@@ -740,9 +948,13 @@ def _pipe_write(handle, blob):
 class LiveAudio:
     """Lê o WASAPI no formato do aparelho, reamostra com soxr e soma em float. Um buraco vira silêncio."""
 
-    def __init__(self, pc_name, mic_name):
+    def __init__(self, pc_name, mic_name, pc_gain=1.0, mic_gain=1.0):
         self.pc_name = pc_name
         self.mic_name = mic_name
+        self.pc_gain = max(0.0, min(1.5, float(pc_gain)))
+        self.mic_gain = max(0.0, min(1.5, float(mic_gain)))
+        self.mic_muted = False
+        self.levels = {"pc": 0.0, "mic": 0.0}
         self.audio = None
         self.keep_audio = None
         self.streams = []
@@ -760,6 +972,14 @@ class LiveAudio:
         self.jobs = []
         self.pumps = []
         self.silence = b""
+
+    def set_gains(self, pc_gain=None, mic_gain=None, mic_muted=None):
+        if pc_gain is not None:
+            self.pc_gain = max(0.0, min(1.5, float(pc_gain)))
+        if mic_gain is not None:
+            self.mic_gain = max(0.0, min(1.5, float(mic_gain)))
+        if mic_muted is not None:
+            self.mic_muted = bool(mic_muted)
 
     def start(self):
         if pyaudio is None:
@@ -898,6 +1118,10 @@ class LiveAudio:
                     stereo = np.asarray(resampler.resample_chunk(block_in), dtype=np.float32)
                 if len(stereo) == 0:
                     continue
+                gain = 0.0 if (key == "mic" and self.mic_muted) else (self.pc_gain if key == "pc" else self.mic_gain)
+                if gain != 1.0:
+                    stereo = np.clip(stereo * np.float32(gain), -1.0, 1.0)
+                self.levels[key] = peak_level(stereo)
                 with self.lock:
                     self.queues[key] = np.concatenate((self.queues[key], stereo))
                     self._mix_ready()
@@ -1072,6 +1296,25 @@ def presence_icon(live):
     return existing_file("Spartan-Live.ico")
 
 
+def valid_saved_geom(geom, monitors):
+    match = re.match(r"^(\d+)x(\d+)\+(-?\d+)\+(-?\d+)$", str(geom or "").strip())
+    if not match:
+        return None
+    w, h, x, y = (int(part) for part in match.groups())
+    if w < 200 or h < 200:
+        return None
+    cx = x + w // 2
+    cy = y + min(40, h // 2)
+    for mon in monitors or []:
+        ml = int(mon.get("left", 0))
+        mt = int(mon.get("top", 0))
+        mr = ml + int(mon.get("width", 1920))
+        mb = mt + int(mon.get("height", 1080))
+        if ml <= cx <= mr and mt <= cy <= mb:
+            return f"{w}x{h}+{x}+{y}"
+    return None
+
+
 def center_on_workarea(area, width, height):
     left, top, right, bottom = area
     return (
@@ -1109,101 +1352,177 @@ def rounded_points(x1, y1, x2, y2, radius):
     ]
 
 
-class Choice(tk.Frame):
-    """Lista escura, com canto arredondado. O menu nativo do Windows fica branco."""
+class _QtVar:
+    """Variável reativa compatível com .get(), .set() e .trace_add('write', cb)."""
+
+    def __init__(self, value=None):
+        self._value = value
+        self._callbacks = []
+        self._sync_fn = None
+
+    def get(self):
+        if self._sync_fn is not None:
+            return self._sync_fn()
+        return self._value
+
+    def set(self, value):
+        self._value = value
+        for cb in list(self._callbacks):
+            try:
+                cb()
+            except Exception:
+                pass
+
+    def trace_add(self, _mode, callback):
+        self._callbacks.append(callback)
+        return f"trace_{len(self._callbacks)}"
+
+
+def _ensure_qt_app():
+    os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "0")
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv[:1] or ["SpartanLive"])
+    return app
+
+
+class _ChoicePopup(QFrame):
+    def __init__(self, owner, labels, field, fg, accent, line):
+        super().__init__(None, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint)
+        self.owner = owner
+        self.setStyleSheet(
+            f"QFrame {{ background-color: {field}; border: 1px solid {line}; border-radius: 10px; }}"
+            f"QScrollArea {{ background: transparent; border: none; }}"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(2, 4, 2, 4)
+        layout.setSpacing(0)
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        inner = QWidget()
+        inner.setStyleSheet(f"background-color: {field}; border: none;")
+        vbox = QVBoxLayout(inner)
+        vbox.setContentsMargins(2, 2, 2, 2)
+        vbox.setSpacing(1)
+        for label in labels:
+            item = QLabel(label, inner)
+            item.setFont(QFont("Segoe UI", 10))
+            item.setCursor(Qt.CursorShape.PointingHandCursor)
+            item.setStyleSheet(
+                f"QLabel {{ background-color: {field}; color: {fg}; padding: 7px 12px; border-radius: 6px; border: none; }}"
+                f"QLabel:hover {{ background-color: {accent}; color: #f6f1f1; }}"
+            )
+            item.mousePressEvent = lambda _ev, val=label: self.owner.pick(val)
+            vbox.addWidget(item)
+        scroll.setWidget(inner)
+        layout.addWidget(scroll)
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        if self.owner.popup is self:
+            self.owner.popup = None
+
+
+class Choice(QWidget):
+    """Lista escura com canto arredondado e anti-aliasing nativo Qt."""
 
     def __init__(self, master, variable, labels, bg, field, fg, accent):
-        super().__init__(master, bg=bg)
+        _ensure_qt_app()
+        super().__init__(master if isinstance(master, QWidget) else None)
         self.variable = variable
         self.labels = list(labels) or [""]
+        self.bg = bg
         self.field = field
         self.fg = fg
         self.accent = accent
         self.line = "#343434"
         self.popup = None
-        self.canvas = tk.Canvas(self, height=44, bg=bg, highlightthickness=0, bd=0, cursor="hand2")
-        self.canvas.pack(fill="x")
-        self.canvas.bind("<Configure>", lambda _event: self.redraw())
-        self.canvas.bind("<Button-1>", lambda _event: self.open_menu())
+        self.canvas = self
+        self.setFixedHeight(44)
+        self.setMinimumWidth(80)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.variable.trace_add("write", lambda *_args: self.redraw())
 
+    def pack(self, **_kwargs):
+        return
+
+    def find_all(self):
+        return [1]
+
+    def type(self, _item):
+        return "image"
+
+    def itemcget(self, _item, key):
+        return self.field if key == "fill" else ""
+
+    def _wheel_cycle(self, event):
+        if not self.labels or len(self.labels) <= 1:
+            return "break"
+        delta = int(getattr(event, "delta", 0) or 0)
+        if delta == 0:
+            return "break"
+        step = -1 if delta > 0 else 1
+        current = self.variable.get()
+        try:
+            idx = self.labels.index(current)
+        except ValueError:
+            idx = 0
+        next_idx = max(0, min(len(self.labels) - 1, idx + step))
+        if self.labels[next_idx] != current:
+            self.variable.set(self.labels[next_idx])
+        return "break"
+
+    def wheelEvent(self, event):
+        delta = event.angleDelta().y()
+        self._wheel_cycle(type("Ev", (), {"delta": delta})())
+        event.accept()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.open_menu()
+            event.accept()
+
     def redraw(self):
-        canvas = self.canvas
-        width = max(canvas.winfo_width(), 40)
-        signature = (width, self.variable.get())
-        if signature == getattr(self, "_drawn", None):
-            return
-        self._drawn = signature
-        canvas.delete("all")
-        height = 44
-        canvas.create_polygon(
-            rounded_points(1, 1, width - 2, height - 2, 14),
-            smooth=True, fill=self.field, outline=self.line,
-        )
-        shown = self.variable.get()
-        font = tkfont.Font(family="Segoe UI", size=11)
-        limit = max(40, width - 48)
-        while shown and font.measure(shown) > limit:
-            shown = shown[:-2] + "…"
-        canvas.create_text(16, height / 2, text=shown, anchor="w", fill=self.fg, font=font)
-        canvas.create_text(width - 18, height / 2, text="▾", fill="#9a9a9a", font=("Segoe UI", 12))
+        self.update()
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        w = max(40, self.width())
+        h = self.height()
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(1.0, 1.0, w - 2.0, h - 2.0), 12.0, 12.0)
+        painter.fillPath(path, QColor(self.field))
+        pen = QPen(QColor(self.line), 1.0)
+        painter.setPen(pen)
+        painter.drawPath(path)
+
+        font = QFont("Segoe UI", 10)
+        painter.setFont(font)
+        fm = QFontMetrics(font)
+        shown = fm.elidedText(str(self.variable.get() or ""), Qt.TextElideMode.ElideRight, max(40, w - 48))
+        painter.setPen(QColor(self.fg))
+        painter.drawText(QRectF(16, 0, max(40, w - 48), h), int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), shown)
+
+        arrow_font = QFont("Segoe UI", 11)
+        painter.setFont(arrow_font)
+        painter.setPen(QColor("#9a9a9a"))
+        painter.drawText(QRectF(w - 30, 0, 20, h), int(Qt.AlignmentFlag.AlignCenter), "▾")
+        painter.end()
 
     def open_menu(self):
         self.close_menu()
-        width = max(self.winfo_width(), 220)
+        w = max(self.width(), 220)
         row = 36
-        height = min(320, 8 + row * len(self.labels))
-        popup = tk.Toplevel(self)
-        popup.overrideredirect(True)
-        popup.configure(bg=self.field)
-        left = self.winfo_rootx()
-        top = self.winfo_rooty() + self.winfo_height() + 6
-        if top + height > self.winfo_screenheight() - 8:
-            top = max(8, self.winfo_rooty() - height - 6)
-        left = min(max(8, left), max(8, self.winfo_screenwidth() - width - 8))
-        popup.geometry(f"{width}x{height}+{left}+{top}")
-        popup.attributes("-topmost", True)
-        canvas = tk.Canvas(popup, bg=self.field, highlightthickness=1, highlightbackground=self.line, height=height)
-        canvas.pack(fill="both", expand=True)
-        inner = tk.Frame(canvas, bg=self.field)
-        window = canvas.create_window((0, 0), window=inner, anchor="nw")
-
-        def fit(_event=None):
-            canvas.itemconfigure(window, width=canvas.winfo_width())
-            canvas.configure(scrollregion=canvas.bbox("all"))
-
-        def wheel(event):
-            canvas.yview_scroll(int(-event.delta / 120), "units")
-
-        inner.bind("<Configure>", fit)
-        canvas.bind("<MouseWheel>", wheel)
-        for label in self.labels:
-            item = tk.Label(
-                inner, text=label, anchor="w", bg=self.field, fg=self.fg,
-                font=("Segoe UI", 11), padx=14, pady=8, cursor="hand2",
-            )
-            item.pack(fill="x")
-            item.bind("<Enter>", lambda _event, widget=item: widget.configure(bg=self.accent, fg="#f6f1f1"))
-            item.bind("<Leave>", lambda _event, widget=item: widget.configure(bg=self.field, fg=self.fg))
-            item.bind("<Button-1>", lambda _event, value=label: self.pick(value))
-            item.bind("<MouseWheel>", wheel)
+        h = min(320, 12 + row * len(self.labels))
+        popup = _ChoicePopup(self, self.labels, self.field, self.fg, self.accent, self.line)
+        popup.setFixedSize(w, h)
+        global_pos = self.mapToGlobal(QPoint(0, self.height() + 4))
+        popup.move(global_pos)
         self.popup = popup
-        popup.focus_force()
-        popup.bind("<Escape>", lambda _event: self.close_menu())
-        popup.after(250, lambda: popup.bind("<FocusOut>", lambda _event: self.after(160, self._away)))
-
-    def _away(self):
-        popup = self.popup
-        if popup is None:
-            return
-        try:
-            focus = popup.focus_get()
-        except tk.TclError:
-            self.close_menu()
-            return
-        if focus is not None and str(focus).startswith(str(popup)):
-            return
-        self.close_menu()
+        popup.show()
 
     def pick(self, label):
         self.variable.set(label)
@@ -1213,40 +1532,218 @@ class Choice(tk.Frame):
         popup = self.popup
         self.popup = None
         if popup is not None:
-            try:
-                popup.destroy()
-            except tk.TclError:
-                pass
+            popup.close()
 
 
-class PillButton(tk.Canvas):
+class _MiniTagButton(QLabel):
+    def __init__(self, parent, text, bg, fg, accent, on_click):
+        super().__init__(text, parent)
+        self._text = text
+        self._bg = bg
+        self._fg = fg
+        self._accent = accent
+        self._on_click = on_click
+        self.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setFixedHeight(20)
+        self.setContentsMargins(6, 1, 6, 1)
+        self._apply_style(False)
+
+    def _apply_style(self, hover):
+        bg = self._accent if hover else self._bg
+        fg = "#f6f1f1" if hover else self._fg
+        self.setStyleSheet(f"QLabel {{ background-color: {bg}; color: {fg}; border-radius: 5px; padding: 1px 5px; }}")
+
+    def enterEvent(self, event):
+        self._apply_style(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._apply_style(False)
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._on_click()
+            event.accept()
+
+    def cget(self, key):
+        if key == "text":
+            return self.text()
+        return ""
+
+
+class _VolumeTrackCanvas(QWidget):
+    def __init__(self, pill):
+        super().__init__(pill)
+        self.pill = pill
+        self.setFixedSize(112, 20)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.pill._pick_x(event.position().x())
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            self.pill._pick_x(event.position().x())
+            event.accept()
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        w = self.width()
+        h = self.height()
+        bar_w = max(20, w - 42)
+        val = clamp_gain(self.pill.variable.get() or 0)
+        ratio = min(1.0, max(0.0, val / 150.0))
+        y0 = h // 2 - 3
+        track_path = QPainterPath()
+        track_path.addRoundedRect(QRectF(4, y0, bar_w, 6), 3.0, 3.0)
+        painter.fillPath(track_path, QColor("#2a2a2a"))
+        fill_color = "#555555" if self.pill.muted or val == 0 else self.pill.accent
+        if ratio > 0:
+            fill_w = max(4.0, bar_w * ratio)
+            fill_path = QPainterPath()
+            fill_path.addRoundedRect(QRectF(4, y0, fill_w, 6), 3.0, 3.0)
+            painter.fillPath(fill_path, QColor(fill_color))
+        if self.pill.level > 0.02 and not self.pill.muted and val > 0:
+            meter_w = max(2.0, bar_w * min(1.0, self.pill.level))
+            painter.fillRect(QRectF(4, y0 + 7, meter_w, 2), QColor("#3dbe6e"))
+        label = "Mudo" if self.pill.muted else f"{val}%"
+        painter.setFont(QFont("Segoe UI", 8))
+        painter.setPen(QColor(self.pill.fg))
+        painter.drawText(QRectF(0, 0, w - 2, h), int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter), label)
+        painter.end()
+
+
+class VolumePill(QWidget):
+    def __init__(self, master, variable, command, bg, field, fg, accent):
+        _ensure_qt_app()
+        super().__init__(master if isinstance(master, QWidget) else None)
+        self.variable = variable
+        self.command = command
+        self.field = field
+        self.fg = fg
+        self.accent = accent
+        self.level = 0.0
+        self.muted = False
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        self.zero_btn = _MiniTagButton(self, "0%", "#252525", fg, accent, lambda: self._set_exact(0))
+        self.canvas = _VolumeTrackCanvas(self)
+        self.hundred_btn = _MiniTagButton(self, "100%", "#252525", fg, accent, lambda: self._set_exact(100))
+        row.addWidget(self.zero_btn)
+        row.addWidget(self.canvas)
+        row.addWidget(self.hundred_btn)
+        self.variable.trace_add("write", lambda *_args: self.redraw())
+
+    def _set_exact(self, val):
+        self.variable.set(clamp_gain(val))
+        if self.command:
+            self.command()
+        return "break"
+
+    def _wheel(self, event):
+        delta = int(getattr(event, "delta", 0) or 0)
+        if delta == 0:
+            return "break"
+        step = 5 if delta > 0 else -5
+        cur = clamp_gain(self.variable.get() or 0)
+        self.variable.set(clamp_gain(cur + step))
+        if self.command:
+            self.command()
+        return "break"
+
+    def wheelEvent(self, event):
+        self._wheel(type("Ev", (), {"delta": event.angleDelta().y()})())
+        event.accept()
+
+    def set_level(self, level, muted=False):
+        level = max(0.0, min(1.0, float(level)))
+        if abs(level - self.level) > 0.02 or bool(muted) != self.muted:
+            self.level = level
+            self.muted = bool(muted)
+            self.redraw()
+
+    def _pick_x(self, x):
+        w = max(20, self.canvas.width() - 42)
+        ratio = max(0.0, min(1.0, (x - 4.0) / w))
+        val = clamp_gain(ratio * 150.0)
+        self.variable.set(val)
+        if self.command:
+            self.command()
+
+    def _pick(self, event):
+        self._pick_x(getattr(event, "x", 0))
+        return "break"
+
+    def redraw(self):
+        self.canvas.update()
+
+
+class PillButton(QWidget):
     def __init__(self, master, text, command, bg, fill, fg, height=48):
-        super().__init__(master, height=height, bg=bg, highlightthickness=0, bd=0, cursor="hand2")
+        _ensure_qt_app()
+        super().__init__(master if isinstance(master, QWidget) else None)
         self.label = text
         self.command = command
+        self.bg = bg
         self.fill = fill
         self.fg = fg
-        self.bind("<Configure>", lambda _event: self.redraw())
-        self.bind("<Button-1>", lambda _event: self.command())
+        self._height = int(height)
+        self.setFixedHeight(self._height)
+        self.setMinimumWidth(80)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def config(self, **kwargs):
         if "text" in kwargs:
             self.label = kwargs.pop("text")
-            self.redraw()
-        if kwargs:
-            super().config(**kwargs)
+        if "width" in kwargs:
+            self.setMinimumWidth(int(kwargs.pop("width")))
+        self.redraw()
 
     configure = config
 
     def redraw(self):
-        self.delete("all")
-        width = max(self.winfo_width(), 40)
-        height = int(self["height"])
-        self.create_polygon(
-            rounded_points(1, 1, width - 2, height - 2, height / 2),
-            smooth=True, fill=self.fill, outline=self.fill,
-        )
-        self.create_text(width / 2, height / 2, text=self.label, fill=self.fg, font=("Segoe UI", 12, "bold"))
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.command:
+            self.command()
+            event.accept()
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        w = max(40, self.width())
+        h = self.height()
+        radius = (h - 2.0) / 2.0
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(1.0, 1.0, w - 2.0, h - 2.0), radius, radius)
+        painter.fillPath(path, QColor(self.fill))
+        font = QFont("Segoe UI", 10 if h <= 34 else 11, QFont.Weight.Bold)
+        painter.setFont(font)
+        painter.setPen(QColor(self.fg))
+        painter.drawText(QRectF(0, 0, w, h), int(Qt.AlignmentFlag.AlignCenter), self.label)
+        painter.end()
+
+    def winfo_y(self):
+        parent = self.parentWidget()
+        while parent is not None and not isinstance(parent, _ContentWidget):
+            parent = parent.parentWidget()
+        return self.mapTo(parent or self.window(), QPoint(0, 0)).y()
+
+    def winfo_height(self):
+        return self.height()
+
+    def winfo_width(self):
+        return self.width()
 
 
 def clean_host(value, fallback=""):
@@ -1422,6 +1919,13 @@ def tray_action(lparam):
     return ""
 
 
+def taskbar_exstyle(exstyle, visible):
+    """Aberta, a janela fica na barra. Na bandeja, o botão sai."""
+    if visible:
+        return (int(exstyle) | 0x00040000) & ~0x00000080
+    return (int(exstyle) & ~0x00040000) | 0x00000080
+
+
 def icon_content_box(width, height, pixels, threshold=24):
     min_x, min_y = width, height
     max_x, max_y = -1, -1
@@ -1572,10 +2076,168 @@ def load_square_icon(path, size):
     return handle or None
 
 
-class App(tk.Tk):
+DEFAULT_WIDTH = 560
+DEFAULT_HEIGHT = 720
+RESIZE_GRIP = 6
+
+
+def scroll_bars_needed(view_w, view_h, base_w=DEFAULT_WIDTH, base_h=DEFAULT_HEIGHT):
+    """Barras independentes: aparecem só quando a área fica menor que o conteúdo."""
+    return int(view_w) < int(base_w), int(view_h) < int(base_h)
+
+
+def resize_hit_test(x, y, width, height, grip=RESIZE_GRIP):
+    """Zona de arraste das bordas e cantos da janela."""
+    left = int(x) < int(grip)
+    right = int(x) >= int(width) - int(grip)
+    top = int(y) < int(grip)
+    bottom = int(y) >= int(height) - int(grip)
+    if top and left:
+        return 13
+    if top and right:
+        return 14
+    if bottom and left:
+        return 16
+    if bottom and right:
+        return 17
+    if left:
+        return 10
+    if right:
+        return 11
+    if top:
+        return 12
+    if bottom:
+        return 15
+    return 0
+
+
+_RESIZE_CURSORS = {
+    10: "size_we",
+    11: "size_we",
+    12: "size_ns",
+    15: "size_ns",
+    13: "size_nw_se",
+    17: "size_nw_se",
+    14: "size_ne_sw",
+    16: "size_ne_sw",
+}
+
+
+_QT_EDGE_MAP = {
+    10: Qt.Edge.LeftEdge,
+    11: Qt.Edge.RightEdge,
+    12: Qt.Edge.TopEdge,
+    15: Qt.Edge.BottomEdge,
+    13: Qt.Edge.TopEdge | Qt.Edge.LeftEdge,
+    14: Qt.Edge.TopEdge | Qt.Edge.RightEdge,
+    16: Qt.Edge.BottomEdge | Qt.Edge.LeftEdge,
+    17: Qt.Edge.BottomEdge | Qt.Edge.RightEdge,
+}
+
+_QT_CURSOR_MAP = {
+    10: Qt.CursorShape.SizeHorCursor,
+    11: Qt.CursorShape.SizeHorCursor,
+    12: Qt.CursorShape.SizeVerCursor,
+    15: Qt.CursorShape.SizeVerCursor,
+    13: Qt.CursorShape.SizeFDiagCursor,
+    17: Qt.CursorShape.SizeFDiagCursor,
+    14: Qt.CursorShape.SizeBDiagCursor,
+    16: Qt.CursorShape.SizeBDiagCursor,
+}
+
+
+class _ScrollProxy:
+    def __init__(self, fn):
+        self._fn = fn
+
+    def winfo_ismapped(self):
+        return bool(self._fn())
+
+
+class _LabelProxy(QLabel):
+    def cget(self, key):
+        if key == "text":
+            return self.text()
+        return ""
+
+    def config(self, **kwargs):
+        if "text" in kwargs:
+            self.setText(str(kwargs["text"]))
+
+    configure = config
+
+    def winfo_y(self):
+        parent = self.parentWidget()
+        while parent is not None and not isinstance(parent, _ContentWidget):
+            parent = parent.parentWidget()
+        return self.mapTo(parent or self.window(), QPoint(0, 0)).y()
+
+    def winfo_height(self):
+        return self.height()
+
+    def winfo_width(self):
+        return self.width()
+
+
+class _CheckProxy(QCheckBox):
+    def winfo_y(self):
+        parent = self.parentWidget()
+        while parent is not None and not isinstance(parent, _ContentWidget):
+            parent = parent.parentWidget()
+        return self.mapTo(parent or self.window(), QPoint(0, 0)).y()
+
+    def winfo_height(self):
+        return self.height()
+
+    def winfo_width(self):
+        return self.width()
+
+
+class _ScrollArea(QScrollArea):
+    def wheelEvent(self, event):
+        mods = event.modifiers()
+        shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+        delta_y = event.angleDelta().y()
+        delta_x = event.angleDelta().x()
+        raw = delta_y if delta_y != 0 else delta_x
+        if raw == 0:
+            event.ignore()
+            return
+        step = int(-raw / 120 * 48) or (-16 if raw > 0 else 16)
+        bar = self.horizontalScrollBar() if shift else self.verticalScrollBar()
+        if bar is not None and bar.maximum() > 0:
+            bar.setValue(max(bar.minimum(), min(bar.maximum(), bar.value() + step)))
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+
+class _ContentWidget(QWidget):
+    def sizeHint(self):
+        return QSize(DEFAULT_WIDTH - 2, DEFAULT_HEIGHT - 44)
+
+    def minimumSizeHint(self):
+        return QSize(1, 1)
+
+    def winfo_reqheight(self):
+        return DEFAULT_HEIGHT - 44
+
+    def winfo_height(self):
+        return self.height()
+
+    def winfo_width(self):
+        return self.width()
+
+
+class App(QWidget):
+    _dispatch_sig = Signal(object)
+
     def __init__(self):
-        super().__init__()
-        self.title("Spartan Live")
+        _ensure_qt_app()
+        super().__init__(None, Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
+        self._main_thread_id = threading.get_ident()
+        self._dispatch_sig.connect(self._on_dispatch)
+        self.setWindowTitle("Spartan Live")
         self.bg = "#171717"
         self.fg = "#ececec"
         self.muted = "#9a9a9a"
@@ -1588,16 +2250,22 @@ class App(tk.Tk):
         self._old_wndproc = None
         self._tray_pending = ctypes.c_int(0)
         self._on_air = False
+        self._timers = {}
+        self._timer_seq = 0
+        self._edge_cursor_code = 0
+
         icon = icon_file()
         if icon:
             try:
-                self.iconbitmap(default=icon)
-            except tk.TclError:
+                self.setWindowIcon(QIcon(icon))
+            except Exception:
                 pass
-        width, height = 560, 720
+        width, height = DEFAULT_WIDTH, DEFAULT_HEIGHT
         origin_x, origin_y = center_on_workarea(primary_workarea(), width, height)
-        self.geometry(f"{width}x{height}+{origin_x}+{origin_y}")
-        self.configure(bg=self.bg, highlightthickness=1, highlightbackground="#343434")
+        self.setMinimumSize(240, 240)
+        self.setGeometry(origin_x, origin_y, width, height)
+        self.setMouseTracking(True)
+
         self.proc = None
         self.video_proc = None
         self._video_time = 0.0
@@ -1607,99 +2275,327 @@ class App(tk.Tk):
         self.running = False
         self.stopping = False
         self._switch_to = None
+        self._switch_quality = None
         self._switch_ready = False
         self._switch_ticket = 0
+        self._base_status = ""
+        self._slow_net = False
+        self._slow_streak = 0
+        self._viewers_count = 0
+        self._last_viewer_poll = 0.0
+        self._hotkeys_installed = False
         self.publish = load_json(existing_file("publish.json"), {})
         self.settings = load_json(settings_path(), {})
         self.monitors = list_monitors()
+        safe_geom = valid_saved_geom(self.settings.get("window_geom"), self.monitors)
+        if safe_geom:
+            self.geometry(safe_geom)
         self._build()
-        self.bind("<Map>", self._on_map)
         self._tray_job = None
         self._dragging = False
+        self.show()
         self.after(0, self._borderless)
         self.after(0, self._install_tray_hook)
-        self.after(80, self._pump_tray)
+        self._tray_job = self.after(80, self._pump_tray)
+        QApplication.instance().installEventFilter(self)
+
+    def _on_dispatch(self, callback):
+        try:
+            callback()
+        except Exception:
+            pass
+
+    def after(self, ms, callback):
+        if threading.get_ident() != getattr(self, "_main_thread_id", None):
+            if int(ms) <= 0:
+                self._dispatch_sig.emit(callback)
+                return 0
+            self._dispatch_sig.emit(lambda: self.after(ms, callback))
+            return 0
+        self._timer_seq += 1
+        tid = self._timer_seq
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+
+        def _fire():
+            self._timers.pop(tid, None)
+            try:
+                callback()
+            except Exception:
+                pass
+
+        timer.timeout.connect(_fire)
+        self._timers[tid] = timer
+        timer.start(max(0, int(ms)))
+        return tid
+
+    def after_cancel(self, tid):
+        timer = self._timers.pop(tid, None)
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+
+    def geometry(self, spec=None):
+        if spec is None:
+            ms = getattr(self, "_manual_size", None)
+            w, h = ms if ms else (self.width(), self.height())
+            return f"{w}x{h}+{self.x()}+{self.y()}"
+        m = re.match(r"^\s*(\d+)x(\d+)([+-]+\d+)([+-]+\d+)\s*$", str(spec))
+        if m:
+            w, h = int(m.group(1)), int(m.group(2))
+            x = int(re.sub(r"^\+\+", "+", re.sub(r"^\+-", "-", m.group(3))))
+            y = int(re.sub(r"^\+\+", "+", re.sub(r"^\+-", "-", m.group(4))))
+            self._manual_size = (w, h)
+            self._in_geometry = True
+            try:
+                self.move(x, y)
+                self.resize(w, h)
+                self._sync_viewport(w, h)
+            finally:
+                self._in_geometry = False
+
+    def update_idletasks(self):
+        QApplication.processEvents()
+        ms = getattr(self, "_manual_size", None)
+        if ms:
+            self._sync_viewport(ms[0], ms[1])
+
+    def update(self):
+        super().update()
+        QApplication.processEvents()
+        ms = getattr(self, "_manual_size", None)
+        if ms:
+            self._sync_viewport(ms[0], ms[1])
+
+    def winfo_width(self):
+        ms = getattr(self, "_manual_size", None)
+        return ms[0] if ms else self.width()
+
+    def winfo_height(self):
+        ms = getattr(self, "_manual_size", None)
+        return ms[1] if ms else self.height()
+
+    def winfo_x(self):
+        return self.x()
+
+    def winfo_y(self):
+        return self.y()
 
     def _hwnd(self):
-        parent = ctypes.windll.user32.GetParent(self.winfo_id())
-        return parent or self.winfo_id()
+        try:
+            return int(self.winId())
+        except Exception:
+            return 0
 
     def _borderless(self):
         try:
             hwnd = self._hwnd()
             if not hwnd:
                 return
-            style = ctypes.windll.user32.GetWindowLongW(hwnd, -16)
-            if not (style & 0x00C00000):
-                return
-            style = (style & ~0x00C00000 & ~0x00040000) | 0x00020000 | 0x00010000 | 0x00080000
-            ctypes.windll.user32.SetWindowLongW(hwnd, -16, style)
-            ex = ctypes.windll.user32.GetWindowLongW(hwnd, -20)
-            ex = (ex | 0x00040000) & ~0x00000080
-            ctypes.windll.user32.SetWindowLongW(hwnd, -20, ex)
-            ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0027)
+            user32 = ctypes.windll.user32
+            ex = user32.GetWindowLongW(hwnd, -20)
+            user32.SetWindowLongW(hwnd, -20, taskbar_exstyle(ex, not self._in_tray))
+            self._set_win32_icons(hwnd, presence_icon(self._on_air))
         except Exception:
             pass
 
-    def _on_map(self, _event=None):
-        self._borderless()
+    def _set_win32_icons(self, hwnd, path):
+        if not hwnd or not path:
+            return
+        try:
+            user32 = ctypes.windll.user32
+            small = load_square_icon(path, 16)
+            big = load_square_icon(path, 32)
+            if small:
+                user32.SendMessageW(hwnd, 0x0080, 0, small)
+            if big:
+                user32.SendMessageW(hwnd, 0x0080, 1, big)
+        except Exception:
+            pass
 
-    def _caption(self):
-        bar = tk.Frame(self, bg=self.bg, height=42)
-        bar.pack(fill="x")
-        bar.pack_propagate(False)
-        name = tk.Label(bar, text="Spartan Live", bg=self.bg, fg=self.fg, font=("Segoe UI", 11, "bold"))
-        name.pack(side="left", padx=16)
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(self.bg))
+        pen = QPen(QColor("#343434"), 1)
+        painter.setPen(pen)
+        painter.drawRect(0, 0, self.width() - 1, self.height() - 1)
+        painter.end()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        sz = event.size()
+        ms = getattr(self, "_manual_size", None)
+        if ms and (sz.width(), sz.height()) != ms:
+            self._sync_viewport(ms[0], ms[1])
+            return
+        self._sync_viewport(sz.width(), sz.height())
+
+    def _over_scrollbar(self, watched, global_pos):
+        if not hasattr(self, "scroll_area"):
+            return False
+        w = watched if isinstance(watched, QWidget) else QApplication.widgetAt(global_pos)
+        vbar = self.scroll_area.verticalScrollBar()
+        hbar = self.scroll_area.horizontalScrollBar()
+        cur = w
+        while cur is not None:
+            if cur is vbar or cur is hbar:
+                return True
+            cur = cur.parentWidget()
+        for bar, active in ((vbar, getattr(self, "_need_y", False)), (hbar, getattr(self, "_need_x", False))):
+            if active and bar is not None and bar.isVisible():
+                bp = bar.mapFromGlobal(global_pos)
+                if 0 <= bp.x() < bar.width() and 0 <= bp.y() < bar.height():
+                    return True
+        return False
+
+    def eventFilter(self, watched, event):
+        if not self.isVisible():
+            return False
+        etype = event.type()
+        if etype == QEvent.Type.Wheel and hasattr(self, "scroll_area"):
+            w = watched if isinstance(watched, QWidget) else None
+            cur = w
+            while cur is not None:
+                if isinstance(cur, VolumePill):
+                    return False
+                cur = cur.parentWidget()
+            mods = event.modifiers()
+            shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+            delta_y = event.angleDelta().y()
+            delta_x = event.angleDelta().x()
+            raw = delta_y if delta_y != 0 else delta_x
+            if raw != 0:
+                step = int(-raw / 120 * 48) or (-16 if raw > 0 else 16)
+                bar = self.scroll_area.horizontalScrollBar() if shift else self.scroll_area.verticalScrollBar()
+                if bar is not None and bar.maximum() > 0:
+                    bar.setValue(max(bar.minimum(), min(bar.maximum(), bar.value() + step)))
+                    event.accept()
+                    return True
+            return False
+        if etype == QEvent.Type.MouseMove and not (event.buttons() & Qt.MouseButton.LeftButton):
+            gp = QCursor.pos()
+            if self._over_scrollbar(watched, gp):
+                if self._edge_cursor_code != 0:
+                    self._edge_cursor_code = 0
+                    self.unsetCursor()
+                return False
+            lp = self.mapFromGlobal(gp)
+            if 0 <= lp.x() < self.width() and 0 <= lp.y() < self.height():
+                code = resize_hit_test(lp.x(), lp.y(), self.width(), self.height(), RESIZE_GRIP)
+                if code != self._edge_cursor_code:
+                    self._edge_cursor_code = code
+                    if code in _QT_CURSOR_MAP:
+                        self.setCursor(_QT_CURSOR_MAP[code])
+                    else:
+                        self.unsetCursor()
+        elif etype == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            self._manual_size = None
+            gp = QCursor.pos()
+            if self._over_scrollbar(watched, gp):
+                return False
+            lp = self.mapFromGlobal(gp)
+            if 0 <= lp.x() < self.width() and 0 <= lp.y() < self.height():
+                code = resize_hit_test(lp.x(), lp.y(), self.width(), self.height(), RESIZE_GRIP)
+                edges = _QT_EDGE_MAP.get(code)
+                if edges is not None:
+                    self._maximized = False
+                    if getattr(self, "max_button", None):
+                        self.max_button.configure(text="□")
+                    wh = self.windowHandle()
+                    if wh is not None and wh.startSystemResize(edges):
+                        return True
+        return False
+
+    def _caption(self, root_layout):
+        bar = QWidget(self)
+        bar.setFixedHeight(34)
+        bar.setStyleSheet(f"background-color: {self.bg};")
+        hbox = QHBoxLayout(bar)
+        hbox.setContentsMargins(8, 0, 0, 0)
+        hbox.setSpacing(0)
+        hbox.addStretch(1)
+        self._maximized = False
+        self._restore_geom = None
         for text, command, color in (
-            ("✕", self.destroy, "#f0d0d0"),
             ("—", self._minimize, self.fg),
+            ("□", self._toggle_maximize, self.fg),
+            ("✕", self.destroy, "#f0d0d0"),
         ):
-            button = tk.Label(bar, text=text, bg=self.bg, fg=color, font=("Segoe UI", 12), width=4, cursor="hand2")
-            button.pack(side="right", fill="y")
-            button.bind("<Button-1>", lambda _event, command=command: command())
-            button.bind("<Enter>", lambda _event, widget=button: widget.configure(bg="#2a2a2a"))
-            button.bind("<Leave>", lambda _event, widget=button: widget.configure(bg=self.bg))
-        for widget in (bar, name):
-            widget.bind("<Button-1>", self._drag_start)
+            btn = _LabelProxy(text, bar)
+            btn.setFixedSize(42, 34)
+            btn.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            btn.setFont(QFont("Segoe UI", 11))
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            hover_bg = "#c14b4b" if command == self.destroy else "#2a2a2a"
+            btn.setStyleSheet(
+                f"QLabel {{ background-color: {self.bg}; color: {color}; }}"
+                f"QLabel:hover {{ background-color: {hover_bg}; color: #ffffff; }}"
+            )
+            btn.mousePressEvent = lambda ev, cmd=command: cmd() if ev.button() == Qt.MouseButton.LeftButton else None
+            hbox.addWidget(btn)
+            if command == self._toggle_maximize:
+                self.max_button = btn
 
-    def _drag_start(self, _event):
-        self.after(1, self._drag_window)
+        def _bar_press(ev):
+            if ev.button() == Qt.MouseButton.LeftButton:
+                lp = self.mapFromGlobal(QCursor.pos())
+                code = resize_hit_test(lp.x(), lp.y(), self.width(), self.height(), RESIZE_GRIP)
+                if code in _QT_EDGE_MAP:
+                    wh = self.windowHandle()
+                    if wh is not None:
+                        wh.startSystemResize(_QT_EDGE_MAP[code])
+                    return
+                wh = self.windowHandle()
+                if wh is not None:
+                    wh.startSystemMove()
+
+        def _bar_dblclick(ev):
+            if ev.button() == Qt.MouseButton.LeftButton:
+                self._toggle_maximize()
+
+        bar.mousePressEvent = _bar_press
+        bar.mouseDoubleClickEvent = _bar_dblclick
+        root_layout.addWidget(bar)
+
+    def _toggle_maximize(self):
+        if getattr(self, "_maximized", False):
+            self._maximized = False
+            if getattr(self, "max_button", None):
+                self.max_button.configure(text="□")
+            geom = self._restore_geom
+            if not geom:
+                ox, oy = center_on_workarea(primary_workarea(), DEFAULT_WIDTH, DEFAULT_HEIGHT)
+                geom = f"{DEFAULT_WIDTH}x{DEFAULT_HEIGHT}+{ox}+{oy}"
+            self.geometry(geom)
+            return "break"
+        self._restore_geom = f"{max(200, self.width())}x{max(200, self.height())}+{self.x()}+{self.y()}"
+        left, top, right, bottom = primary_workarea()
+        self._maximized = True
+        if getattr(self, "max_button", None):
+            self.max_button.configure(text="❐")
+        self.geometry(f"{max(200, right - left)}x{max(200, bottom - top)}+{left}+{top}")
         return "break"
 
-    def _drag_window(self):
-        job = self._tray_job
-        self._tray_job = None
-        if job:
-            try:
-                self.after_cancel(job)
-            except tk.TclError:
-                pass
-        self._dragging = True
-        try:
-            user32 = ctypes.WinDLL("user32", use_last_error=True)
-            user32.ReleaseCapture.argtypes = []
-            user32.GetCursorPos.argtypes = [ctypes.c_void_p]
-            user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
-            user32.SendMessageW.restype = ctypes.c_ssize_t
-
-            class POINT(ctypes.Structure):
-                _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-
-            point = POINT()
-            user32.GetCursorPos(ctypes.byref(point))
-            packed = ((int(point.y) & 0xFFFF) << 16) | (int(point.x) & 0xFFFF)
-            user32.ReleaseCapture()
-            user32.SendMessageW(self._hwnd(), 0x00A1, 2, packed)
-        finally:
-            self._dragging = False
-            self._pump_tray()
+    def _taskbar_button(self, visible):
+        hwnd = self._hwnd()
+        if not hwnd:
+            return
+        user32 = ctypes.windll.user32
+        ex = user32.GetWindowLongW(hwnd, -20)
+        user32.SetWindowLongW(hwnd, -20, taskbar_exstyle(ex, visible))
+        user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0037)
 
     def _minimize(self):
         if self._show_tray():
             self._in_tray = True
-            self.withdraw()
+            self._taskbar_button(False)
+            self.hide()
+            hwnd = self._hwnd()
+            if hwnd:
+                ctypes.windll.user32.ShowWindow(hwnd, 0)
+            self._taskbar_button(False)
             return
-        ctypes.windll.user32.ShowWindow(self._hwnd(), 6)
+        self.showMinimized()
 
     def _install_tray_hook(self):
         if self._tray_hwnd:
@@ -1742,8 +2638,6 @@ class App(tk.Tk):
         return 0
 
     def _pump_tray(self):
-        if self._dragging:
-            return
         pending = int(self._tray_pending.value)
         if pending:
             self._tray_pending.value = 0
@@ -1751,10 +2645,8 @@ class App(tk.Tk):
                 self._restore_from_tray()
             elif pending == 2:
                 self._tray_menu()
-        try:
-            self._tray_job = self.after(80, self._pump_tray)
-        except tk.TclError:
-            self._tray_job = None
+        self._tick_meters_and_viewers()
+        self._tray_job = self.after(80, self._pump_tray)
 
     def _tray_icon(self):
         user32 = ctypes.windll.user32
@@ -1799,19 +2691,17 @@ class App(tk.Tk):
 
     def _restore_from_tray(self):
         self._in_tray = False
-        try:
-            self.deiconify()
-            self.lift()
-            self.focus_force()
-        except tk.TclError:
-            pass
+        self._taskbar_button(True)
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
         hwnd = self._hwnd()
         if hwnd:
             ctypes.windll.user32.ShowWindow(hwnd, 9)
             ctypes.windll.user32.SetForegroundWindow(hwnd)
+        self._taskbar_button(True)
         self._hide_tray()
         self._borderless()
-        self.update_idletasks()
 
     def _tray_menu(self):
         user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -1843,27 +2733,82 @@ class App(tk.Tk):
         path = presence_icon(self._on_air)
         if path:
             try:
-                self.iconbitmap(default=path)
-            except tk.TclError:
+                self.setWindowIcon(QIcon(path))
+                self._set_win32_icons(self._hwnd(), path)
+            except Exception:
                 pass
         if self._tray_added:
             self._show_tray()
 
     def _build(self):
-        self._caption()
-        self.button = PillButton(self, "Transmitir", self.toggle, self.bg, self.accent, "#f6f1f1", height=44)
-        self.button.pack(side="bottom", fill="x", padx=18, pady=(6, 8))
-        pad = {"padx": 18, "pady": 3}
-        title = tk.Label(self, text="Spartan Live", bg=self.bg, fg=self.fg, font=("Segoe UI", 20, "bold"))
-        title.pack(anchor="w", padx=18, pady=(6, 0))
-        hint = tk.Label(self, text="Escolhe a tela, o som e a imagem.", bg=self.bg, fg=self.muted, wraplength=490, justify="left")
-        hint.pack(anchor="w", padx=18, pady=(0, 4))
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(6, 1, 6, 6)
+        root_layout.setSpacing(0)
+        self._caption(root_layout)
 
-        self.nick = tk.StringVar(value=self.settings.get("nick", ""))
-        self.host = tk.StringVar(value=clean_host(self.settings.get("host") or "", ""))
+        self.scroll_area = _ScrollArea(self)
+        self.scroll_area.setWidgetResizable(False)
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll_area.setStyleSheet(
+            f"""
+            QScrollArea {{ background-color: {self.bg}; border: none; }}
+            QScrollBar:vertical {{
+                background: #202020; width: 12px; margin: 0px; border-radius: 6px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: #666666; min-height: 28px; border-radius: 5px; margin: 2px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: #c14b4b;
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background: none; height: 0px;
+            }}
+            QScrollBar:horizontal {{
+                background: #202020; height: 12px; margin: 0px; border-radius: 6px;
+            }}
+            QScrollBar::handle:horizontal {{
+                background: #666666; min-width: 28px; border-radius: 5px; margin: 2px;
+            }}
+            QScrollBar::handle:horizontal:hover {{
+                background: #c14b4b;
+            }}
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal,
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+                background: none; width: 0px;
+            }}
+            """
+        )
+        root_layout.addWidget(self.scroll_area, 1)
+
+        self.content = _ContentWidget()
+        self.content.setStyleSheet(f"background-color: {self.bg};")
+        self._content_layout = QVBoxLayout(self.content)
+        self._content_layout.setContentsMargins(18, 2, 18, 8)
+        self._content_layout.setSpacing(6)
+        self.scroll_area.setWidget(self.content)
+
+        self._need_x = False
+        self._need_y = False
+        self.v_scroll = _ScrollProxy(lambda: self._need_y)
+        self.h_scroll = _ScrollProxy(lambda: self._need_x)
+
+        title = QLabel("Spartan Live", self.content)
+        title.setFont(QFont("Segoe UI", 18, QFont.Weight.Bold))
+        title.setStyleSheet(f"color: {self.fg};")
+        self._content_layout.addWidget(title)
+
+        hint = QLabel("Escolhe a tela, o som e a imagem.", self.content)
+        hint.setFont(QFont("Segoe UI", 10))
+        hint.setStyleSheet(f"color: {self.muted};")
+        self._content_layout.addWidget(hint)
+
+        self.nick = _QtVar(self.settings.get("nick", ""))
+        self.host = _QtVar(clean_host(self.settings.get("host") or "", ""))
         chosen = parse_quality(self.settings.get("quality"), self.settings.get("fps"))
-        self.quality = tk.StringVar(value=chosen[0])
-        self.monitor_index = tk.IntVar(value=int(self.settings.get("monitor") or 0))
+        self.quality = _QtVar(chosen[0])
+        self.monitor_index = _QtVar(int(self.settings.get("monitor") or 0))
         if self.monitor_index.get() >= len(self.monitors):
             self.monitor_index.set(0)
 
@@ -1874,8 +2819,8 @@ class App(tk.Tk):
         saved = self.monitor_index.get()
         if saved >= len(self.monitor_labels):
             saved = 0
-        self.monitor_choice = tk.StringVar(value=self.monitor_labels[saved])
-        self._choice(pad, "Tela", self.monitor_choice, self.monitor_labels)
+        self.monitor_choice = _QtVar(self.monitor_labels[saved])
+        self._choice("Tela", self.monitor_choice, self.monitor_labels)
         self.monitor_choice.trace_add("write", lambda *_args: self._screen_changed())
 
         self.pc_devices = []
@@ -1895,70 +2840,180 @@ class App(tk.Tk):
         saved_mic = self.settings.get("mic") or ""
         if saved_mic not in self.mic_devices:
             saved_mic = ""
-        self.pc_choice = tk.StringVar(value=saved_pc_label)
-        self.mic_choice = tk.StringVar(value=saved_mic or "Sem microfone")
-        self._choice(pad, "Som do PC", self.pc_choice, pc_labels)
-        self._choice(pad, "Microfone", self.mic_choice, ["Sem microfone", *self.mic_devices])
+        self.pc_choice = _QtVar(saved_pc_label)
+        self.mic_choice = _QtVar(saved_mic or "Sem microfone")
+        self.pc_volume = _QtVar(clamp_gain(self.settings.get("pc_volume", 100)))
+        self.mic_volume = _QtVar(clamp_gain(self.settings.get("mic_volume", 100)))
+        self._mic_muted = False
+        self.pc_meter = self._choice("Som do PC", self.pc_choice, pc_labels, self.pc_volume, self._gain_changed)
+        self.mic_meter = self._choice("Microfone", self.mic_choice, ["Sem microfone", *self.mic_devices], self.mic_volume, self._gain_changed)
         self.audio_live = None
         self.live_nick = ""
         self.live_host = ""
         self.pc_choice.trace_add("write", lambda *_args: self._audio_changed())
         self.mic_choice.trace_add("write", lambda *_args: self._audio_changed())
 
-        quality_box = tk.Frame(self, bg=self.bg)
-        quality_box.pack(fill="x", **pad)
-        tk.Label(quality_box, text="Imagem", bg=self.bg, fg=self.muted).pack(anchor="w")
-        quality_grid = tk.Frame(quality_box, bg=self.bg)
-        quality_grid.pack(fill="x", pady=(4, 0))
+        quality_box = QWidget(self.content)
+        q_vbox = QVBoxLayout(quality_box)
+        q_vbox.setContentsMargins(0, 2, 0, 0)
+        q_vbox.setSpacing(4)
+        q_lbl = QLabel("Imagem", quality_box)
+        q_lbl.setFont(QFont("Segoe UI", 10))
+        q_lbl.setStyleSheet(f"color: {self.muted};")
+        q_vbox.addWidget(q_lbl)
+
+        quality_grid_w = QWidget(quality_box)
+        q_grid = QGridLayout(quality_grid_w)
+        q_grid.setContentsMargins(0, 0, 0, 0)
+        q_grid.setHorizontalSpacing(8)
+        q_grid.setVerticalSpacing(4)
         self.quality_buttons = {}
-        for index, (key, label, _width, _height, _fps) in enumerate(QUALITY_OPTIONS):
+        for index, (key, label, _width, _height, _fps) in enumerate(QUALITY_OPTIONS[:4]):
             button = PillButton(
-                quality_grid, label, lambda key=key: self.quality.set(key),
-                self.bg, self.field, self.fg, height=34,
+                quality_grid_w, label, lambda key=key: self.quality.set(key),
+                self.bg, self.field, self.fg, height=32,
             )
-            button.configure(width=120)
-            button.grid(row=index // 2, column=index % 2, padx=(0, 8), pady=(0, 4), sticky="ew")
+            q_grid.addWidget(button, index // 2, index % 2)
             self.quality_buttons[key] = button
-        quality_grid.columnconfigure(0, weight=1)
-        quality_grid.columnconfigure(1, weight=1)
-        self.quality.trace_add("write", lambda *_args: self._paint_quality())
+
+        self.potato_hint = QLabel("PC batata, ou internet discada? tente a opção abaixo!", quality_grid_w)
+        self.potato_hint.setFont(QFont("Segoe UI", 9))
+        self.potato_hint.setStyleSheet(f"color: {self.muted};")
+        q_grid.addWidget(self.potato_hint, 2, 0, 1, 2)
+
+        potato_key, potato_label, _pw, _ph, _pfps = QUALITY_OPTIONS[4]
+        potato_button = PillButton(
+            quality_grid_w, potato_label, lambda key=potato_key: self.quality.set(key),
+            self.bg, self.field, self.fg, height=32,
+        )
+        q_grid.addWidget(potato_button, 3, 0, 1, 2)
+        self.quality_buttons[potato_key] = potato_button
+        q_grid.setColumnStretch(0, 1)
+        q_grid.setColumnStretch(1, 1)
+        q_vbox.addWidget(quality_grid_w)
+        self._content_layout.addWidget(quality_box)
+
+        self.quality.trace_add("write", lambda *_args: self._quality_changed())
         self._paint_quality()
 
-        self.status = tk.Label(self, text="Parado.", bg=self.bg, fg=self.muted, wraplength=500, justify="left")
-        self.status.pack(anchor="w", padx=18, pady=(4, 0))
-        self.start_with_windows = tk.BooleanVar(value=read_startup_enabled())
-        self.windows_check = tk.Checkbutton(
-            self,
-            text="Abrir com o Windows, sem iniciar a live",
-            variable=self.start_with_windows,
-            command=self._startup_toggled,
-            bg=self.bg,
-            fg=self.fg,
-            selectcolor=self.field,
-            activebackground=self.bg,
-            activeforeground=self.fg,
-            highlightthickness=0,
-            font=("Segoe UI", 10),
-            anchor="w",
+        self.status = _LabelProxy("Parado.", self.content)
+        self.status.setFont(QFont("Segoe UI", 10))
+        self.status.setWordWrap(True)
+        self.status.setStyleSheet(f"color: {self.muted};")
+        self._content_layout.addWidget(self.status)
+
+        self.start_with_windows = _QtVar(read_startup_enabled())
+        self.windows_check = _CheckProxy("Abrir com o Windows, sem iniciar a live", self.content)
+        self.windows_check.setFont(QFont("Segoe UI", 10))
+        self.windows_check.setChecked(bool(self.start_with_windows.get()))
+        self.windows_check.setStyleSheet(
+            f"""
+            QCheckBox {{ color: {self.fg}; spacing: 8px; }}
+            QCheckBox::indicator {{
+                width: 16px; height: 16px; border-radius: 4px;
+                border: 1px solid #484848; background-color: {self.field};
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: {self.accent}; border-color: {self.accent};
+            }}
+            """
         )
-        self.windows_check.pack(fill="x", padx=14, pady=(2, 0))
+
+        def _on_chk(state):
+            self.start_with_windows._value = bool(state)
+            self._startup_toggled()
+
+        self.windows_check.toggled.connect(_on_chk)
+        self._content_layout.addWidget(self.windows_check)
+
+        self._content_layout.addStretch(1)
+
+        self.button = PillButton(self.content, "Transmitir", self.toggle, self.bg, self.accent, "#f6f1f1", height=40)
+        self._content_layout.addWidget(self.button)
+        self._sync_viewport()
+
+    def _sync_viewport(self, w=None, h=None):
+        if not hasattr(self, "scroll_area") or not hasattr(self, "content"):
+            return
+        base_w = DEFAULT_WIDTH - 12
+        base_h = DEFAULT_HEIGHT - 44
+        ms = getattr(self, "_manual_size", None)
+        eff_w = int(w) if isinstance(w, (int, float)) else (ms[0] if ms else self.width())
+        eff_h = int(h) if isinstance(h, (int, float)) else (ms[1] if ms else self.height())
+        total_w = max(1, eff_w - 12)
+        total_h = max(1, eff_h - 41)
+        bar = 12
+        need_x, need_y = scroll_bars_needed(total_w, total_h, base_w, base_h)
+        for _ in range(2):
+            avail_w = max(1, total_w - (bar if need_y else 0))
+            avail_h = max(1, total_h - (bar if need_x else 0))
+            need_x, need_y = scroll_bars_needed(avail_w, avail_h, base_w, base_h)
+        avail_w = max(1, total_w - (bar if need_y else 0))
+        avail_h = max(1, total_h - (bar if need_x else 0))
+        target_w = max(base_w, avail_w)
+        target_h = max(base_h, avail_h)
+        self._need_x = need_x
+        self._need_y = need_y
+        self.scroll_area.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn if need_y else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.scroll_area.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn if need_x else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.content.resize(target_w, target_h)
 
     def _field(self, label, variable):
-        frame = tk.Frame(self, bg=self.bg)
-        frame.pack(fill="x", padx=18, pady=6)
-        tk.Label(frame, text=label, bg=self.bg, fg=self.muted).pack(anchor="w")
-        entry = tk.Entry(
-            frame, textvariable=variable, bg=self.field, fg=self.fg, insertbackground=self.fg,
-            relief="flat", highlightthickness=1, highlightbackground="#343434", highlightcolor=self.accent,
-            font=("Segoe UI", 11),
+        box = QWidget(self.content)
+        vbox = QVBoxLayout(box)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(2)
+        lbl = QLabel(label, box)
+        lbl.setFont(QFont("Segoe UI", 10))
+        lbl.setStyleSheet(f"color: {self.muted};")
+        vbox.addWidget(lbl)
+        entry = QLineEdit(str(variable.get() or ""), box)
+        entry.setFont(QFont("Segoe UI", 11))
+        entry.setFixedHeight(36)
+        entry.setStyleSheet(
+            f"""
+            QLineEdit {{
+                background-color: {self.field}; color: {self.fg};
+                border: 1px solid #343434; border-radius: 8px; padding: 2px 10px;
+            }}
+            QLineEdit:focus {{
+                border: 1px solid {self.accent};
+            }}
+            """
         )
-        entry.pack(fill="x", ipady=6, pady=(2, 0))
+        entry.textChanged.connect(lambda txt: setattr(variable, "_value", txt))
+        variable._sync_fn = entry.text
+        variable.trace_add("write", lambda: entry.setText(str(variable._value or "")) if entry.text() != str(variable._value or "") else None)
+        vbox.addWidget(entry)
+        self._content_layout.addWidget(box)
 
-    def _choice(self, pad, label, variable, labels):
-        frame = tk.Frame(self, bg=self.bg)
-        frame.pack(fill="x", **pad)
-        tk.Label(frame, text=label, bg=self.bg, fg=self.muted, font=("Segoe UI", 10)).pack(anchor="w")
-        Choice(frame, variable, labels, self.bg, self.field, self.fg, self.accent).pack(fill="x", pady=(4, 0))
+    def _choice(self, label, variable, labels, volume_var=None, volume_cmd=None):
+        box = QWidget(self.content)
+        vbox = QVBoxLayout(box)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(3)
+        head = QWidget(box)
+        hbox = QHBoxLayout(head)
+        hbox.setContentsMargins(0, 0, 0, 0)
+        hbox.setSpacing(4)
+        lbl = QLabel(label, head)
+        lbl.setFont(QFont("Segoe UI", 10))
+        lbl.setStyleSheet(f"color: {self.muted};")
+        hbox.addWidget(lbl)
+        hbox.addStretch(1)
+        pill = None
+        if volume_var is not None:
+            pill = VolumePill(head, volume_var, volume_cmd, self.bg, self.field, self.muted, self.accent)
+            hbox.addWidget(pill)
+        vbox.addWidget(head)
+        ch = Choice(box, variable, labels, self.bg, self.field, self.fg, self.accent)
+        vbox.addWidget(ch)
+        self._content_layout.addWidget(box)
+        return pill
 
     def _paint_quality(self):
         current = self.quality.get()
@@ -1989,6 +3044,80 @@ class App(tk.Tk):
     def set_status(self, text):
         self.status.config(text=text)
 
+    def _compose_live_status(self):
+        base = self._base_status
+        if not base or not self.running:
+            return base
+        parts = [base]
+        if self._viewers_count > 0:
+            parts.append(f"👁 {self._viewers_count} assistindo")
+        if self._mic_muted and self.selected_mic():
+            parts.append("Mic mudo")
+        if self._slow_net:
+            parts.append("Internet ou PC sofrendo — tente 720p 30 ou 480p 30")
+        return " · ".join(parts)
+
+    def _refresh_live_status(self):
+        if not self.running or not self._base_status:
+            return
+        self.set_status(self._compose_live_status())
+
+    def _gain_changed(self):
+        try:
+            self.save_settings()
+        except Exception:
+            pass
+        audio = getattr(self, "audio_live", None)
+        if audio is not None:
+            audio.set_gains(
+                pc_gain=clamp_gain(self.pc_volume.get()) / 100.0,
+                mic_gain=clamp_gain(self.mic_volume.get()) / 100.0,
+                mic_muted=self._mic_muted,
+            )
+
+    def _tick_meters_and_viewers(self):
+        audio = getattr(self, "audio_live", None)
+        pc_lvl = audio.levels.get("pc", 0.0) if audio and self.running else 0.0
+        mic_lvl = audio.levels.get("mic", 0.0) if audio and self.running else 0.0
+        if getattr(self, "pc_meter", None) is not None:
+            self.pc_meter.set_level(pc_lvl, False)
+        if getattr(self, "mic_meter", None) is not None:
+            self.mic_meter.set_level(mic_lvl, getattr(self, "_mic_muted", False))
+        if self.running and not self.stopping and self._base_status:
+            now = time.perf_counter()
+            if now - getattr(self, "_last_viewer_poll", 0.0) >= 2.0:
+                self._last_viewer_poll = now
+                nick = self.live_nick
+                host = self.live_host
+                user = str(self.publish.get("user") or "")
+                password = str(self.publish.get("password") or "")
+                if nick and host and user and password:
+                    threading.Thread(
+                        target=self._poll_viewers_worker,
+                        args=(host, nick, user, password),
+                        daemon=True,
+                    ).start()
+
+    def _poll_viewers_worker(self, host, nick, user, password):
+        count = fetch_viewers(host, nick, user, password)
+        if not self.running or self.stopping or self.live_nick != nick:
+            return
+        if count != self._viewers_count:
+            self._viewers_count = count
+            self.after(0, self._refresh_live_status)
+
+    def _current_window_geom(self):
+        if getattr(self, "_maximized", False) and getattr(self, "_restore_geom", None):
+            return self._restore_geom
+        try:
+            w = max(200, self.winfo_width())
+            h = max(200, self.winfo_height())
+            x = self.winfo_x()
+            y = self.winfo_y()
+            return f"{w}x{h}+{x}+{y}"
+        except Exception:
+            return ""
+
     def save_settings(self):
         data = {
             "nick": self.nick.get().strip(),
@@ -1998,8 +3127,13 @@ class App(tk.Tk):
             "monitor": self.selected_monitor(),
             "pc_audio": self.selected_pc_audio(),
             "mic": self.selected_mic(),
+            "pc_volume": clamp_gain(self.pc_volume.get()) if hasattr(self, "pc_volume") else 100,
+            "mic_volume": clamp_gain(self.mic_volume.get()) if hasattr(self, "mic_volume") else 100,
             "start_with_windows": bool(self.start_with_windows.get()),
         }
+        geom = valid_saved_geom(self._current_window_geom(), self.monitors)
+        if geom:
+            data["window_geom"] = geom
         with open(settings_path(), "w", encoding="utf-8") as handle:
             json.dump(data, handle)
 
@@ -2026,14 +3160,14 @@ class App(tk.Tk):
         host = clean_host(self.host.get(), "")
         self.host.set(host)
         if not valid_nick(nick):
-            messagebox.showerror("Spartan Live", "O apelido precisa ter 2 a 24 letras, números, _ ou -.")
+            QMessageBox.critical(self, "Spartan Live", "O apelido precisa ter 2 a 24 letras, números, _ ou -.")
             return
         if not host or not self.publish.get("password") or not self.publish.get("user"):
-            messagebox.showerror("Spartan Live", "Falta o servidor neste programa.")
+            QMessageBox.critical(self, "Spartan Live", "Falta o servidor neste programa.")
             return
         ffmpeg = existing_file("ffmpeg.exe")
         if not ffmpeg:
-            messagebox.showerror("Spartan Live", "Não achei o ffmpeg neste programa.")
+            QMessageBox.critical(self, "Spartan Live", "Não achei o ffmpeg neste programa.")
             return
 
         self.save_settings()
@@ -2079,7 +3213,13 @@ class App(tk.Tk):
         live_audio = None
         if pc_audio or mic:
             self.after(0, lambda: self.set_status("Abrindo o som do PC..."))
-            live_audio = LiveAudio(pc_audio, mic)
+            live_audio = LiveAudio(
+                pc_audio,
+                mic,
+                pc_gain=clamp_gain(self.pc_volume.get()) / 100.0 if hasattr(self, "pc_volume") else 1.0,
+                mic_gain=clamp_gain(self.mic_volume.get()) / 100.0 if hasattr(self, "mic_volume") else 1.0,
+            )
+            live_audio.set_gains(mic_muted=getattr(self, "_mic_muted", False))
             try:
                 run_with_timeout(live_audio.start, 5)
                 self.audio_live = live_audio
@@ -2099,6 +3239,8 @@ class App(tk.Tk):
             note = " Com microfone."
         else:
             note = ""
+        self._capture_mode = prefer_capture(ffmpeg_filters(ffmpeg))
+        log_event(f"captura {self._capture_mode}")
         preferred = None
         try:
             while not self.stopping:
@@ -2107,27 +3249,30 @@ class App(tk.Tk):
                     output_idx = 0
                 self._live_monitor = output_idx
                 monitor = self.monitors[output_idx]
+                q_key, _q_label, width, height, fps = self._consume_quality_switch()
+                self._live_quality = q_key
                 order = [preferred, *[item for item in encoders if item != preferred]] if preferred else encoders
                 restarted = False
                 lost = False
                 for encoder in order:
                     if self.stopping:
                         return
-                    if live_audio is None:
-                        command = build_command(
-                            ffmpeg, "gdigrab", encoder, fps, monitor, output_idx, url, False, width, height,
-                        )
-                        outcome = self._attempt(command, encoder, fps, "gdigrab", None, note, width, height)
-                    else:
-                        self._av_ticket += 1
-                        port = 20000 + ((os.getpid() + self._av_ticket) % 20000)
-                        relay = f"tcp://127.0.0.1:{port}"
-                        pipe = rf"\\.\pipe\spartan-live-{os.getpid()}-{self._av_ticket}"
-                        video = build_command(
-                            ffmpeg, "gdigrab", encoder, fps, monitor, output_idx, url, True, width, height, relay,
-                        )
-                        outcome = self._attempt_synced(
-                            video, pipe, relay, url, encoder, fps, live_audio, note, width, height,
+                    mode = self._capture_mode or "gdigrab"
+                    outcome = self._open_capture(
+                        ffmpeg, mode, encoder, fps, monitor, output_idx, url,
+                        live_audio, note, width, height,
+                    )
+                    if (
+                        outcome is False
+                        and mode == "ddagrab"
+                        and not self._frame_seen
+                        and not self.stopping
+                    ):
+                        log_event("ddagrab nao abriu, usando gdigrab")
+                        self._capture_mode = "gdigrab"
+                        outcome = self._open_capture(
+                            ffmpeg, "gdigrab", encoder, fps, monitor, output_idx, url,
+                            live_audio, note, width, height,
                         )
                     if outcome == "switch":
                         preferred = encoder
@@ -2160,7 +3305,47 @@ class App(tk.Tk):
             return nxt
         return current
 
+    def _consume_quality_switch(self):
+        nxt = getattr(self, "_switch_quality", None)
+        self._switch_quality = None
+        if nxt:
+            return parse_quality(nxt)
+        return self.selected_quality()
+
+    def _has_pending_switch(self):
+        return self._switch_to is not None or getattr(self, "_switch_quality", None) is not None
+
+    def _quality_changed(self):
+        self._paint_quality()
+        if not getattr(self, "status", None):
+            return
+        try:
+            self.save_settings()
+        except Exception:
+            pass
+        if not self.running or self.stopping:
+            return
+        key, label, _w, _h, _fps = self.selected_quality()
+        if key == getattr(self, "_live_quality", None) and getattr(self, "_switch_quality", None) is None:
+            return
+        if key == getattr(self, "_live_quality", None):
+            self._switch_quality = None
+            return
+        self._switch_ticket += 1
+        ticket = self._switch_ticket
+        self._switch_quality = key
+        self._switch_ready = False
+        self.set_status(f"Trocando a qualidade para {label}...")
+        threading.Thread(target=self._announce_switch, args=(ticket, "quality"), daemon=True).start()
+
     def _screen_changed(self):
+        job = getattr(self, "_screen_debounce_job", None)
+        if job:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+            self._screen_debounce_job = None
         try:
             self.save_settings()
         except Exception:
@@ -2172,19 +3357,34 @@ class App(tk.Tk):
             return
         if not 0 <= index < len(self.monitors):
             return
+        try:
+            self._screen_debounce_job = self.after(3000, self._apply_screen_changed)
+        except Exception:
+            self._apply_screen_changed()
+
+    def _apply_screen_changed(self):
+        self._screen_debounce_job = None
+        if not self.running or self.stopping:
+            return
+        index = self.selected_monitor()
+        if index == getattr(self, "_live_monitor", None):
+            self._switch_to = None
+            return
+        if not 0 <= index < len(self.monitors):
+            return
         self._switch_ticket += 1
         ticket = self._switch_ticket
         self._switch_to = index
         self._switch_ready = False
         self.set_status("Trocando a tela...")
-        threading.Thread(target=self._announce_switch, args=(ticket,), daemon=True).start()
+        threading.Thread(target=self._announce_switch, args=(ticket, "screen"), daemon=True).start()
 
-    def _announce_switch(self, ticket):
+    def _announce_switch(self, ticket, kind="screen"):
         nick = self.live_nick
         host = self.live_host
-        log_event(f"troca de tela apelido={nick or '-'}")
+        log_event(f"troca de {'qualidade' if kind == 'quality' else 'tela'} apelido={nick or '-'}")
         try:
-            notify_publisher(host, nick, self.publish.get("user", ""), self.publish.get("password", ""), "switch")
+            notify_publisher(host, nick, self.publish.get("user", ""), self.publish.get("password", ""), "switch", {"kind": kind})
         finally:
             if ticket == self._switch_ticket:
                 self._switch_ready = True
@@ -2192,15 +3392,17 @@ class App(tk.Tk):
     def _wait_proc(self, proc, timeout=None):
         deadline = None if timeout is None else time.perf_counter() + timeout
         while proc.poll() is None:
+            video = getattr(self, "video_proc", None)
+            video_exited = video is not None and video is not proc and video.poll() is not None
             stalled = timeout is None and capture_stalled(
                 getattr(self, "_frame_seen", 0),
                 getattr(self, "_frame_at", time.perf_counter()),
                 time.perf_counter(),
             )
-            if self.stopping or stalled or (self._switch_to is not None and self._switch_ready):
-                if stalled and not self.stopping:
+            has_switch = self._switch_to is not None or getattr(self, "_switch_quality", None) is not None
+            if self.stopping or video_exited or stalled or (has_switch and self._switch_ready):
+                if (stalled or video_exited) and not self.stopping:
                     log_event("captura parada, retomando")
-                    self._hold_viewers()
                 self._kill_ffmpeg()
                 try:
                     proc.wait(timeout=3)
@@ -2263,6 +3465,13 @@ class App(tk.Tk):
             seconds = progress_seconds(text)
             if seconds is not None and seconds > self._video_time:
                 self._video_time = seconds
+            spd = progress_speed(text)
+            if spd is not None:
+                self._slow_streak = network_slow_streak(getattr(self, "_slow_streak", 0), spd)
+                slow_now = self._slow_streak >= 6
+                if slow_now != getattr(self, "_slow_net", False):
+                    self._slow_net = slow_now
+                    self.after(0, self._refresh_live_status)
             if not text.startswith("frame="):
                 continue
             try:
@@ -2293,7 +3502,24 @@ class App(tk.Tk):
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
 
-    def _attempt_synced(self, video_command, pipe_name, relay, rtmp, encoder, fps, live_audio, note, width, height):
+    def _open_capture(self, ffmpeg, mode, encoder, fps, monitor, output_idx, url, live_audio, note, width, height):
+        if live_audio is None:
+            command = build_command(
+                ffmpeg, mode, encoder, fps, monitor, output_idx, url, False, width, height,
+            )
+            return self._attempt(command, encoder, fps, mode, None, note, width, height)
+        self._av_ticket += 1
+        port = 20000 + ((os.getpid() + self._av_ticket) % 20000)
+        relay = f"tcp://127.0.0.1:{port}"
+        pipe = rf"\\.\pipe\spartan-live-{os.getpid()}-{self._av_ticket}"
+        video = build_command(
+            ffmpeg, mode, encoder, fps, monitor, output_idx, url, True, width, height, relay,
+        )
+        return self._attempt_synced(
+            video, pipe, relay, url, encoder, fps, live_audio, note, width, height, mode,
+        )
+
+    def _attempt_synced(self, video_command, pipe_name, relay, rtmp, encoder, fps, live_audio, note, width, height, mode="gdigrab"):
         """A imagem é codificada sozinha. O som entra em seguida, na ordem da captura."""
         if self.stopping:
             self._close_progress()
@@ -2367,7 +3593,7 @@ class App(tk.Tk):
 
         self.reader = threading.Thread(target=read_mux_err, daemon=True)
         self.reader.start()
-        return self._watch_result(mux, live_audio, lines, encoder, fps, note, width, height, "gdigrab")
+        return self._watch_result(mux, live_audio, lines, encoder, fps, note, width, height, mode)
 
     def _watch_result(self, proc, live_audio, lines, encoder, fps, note, width, height, mode):
         try:
@@ -2381,7 +3607,7 @@ class App(tk.Tk):
             message = f"Transmitindo em {height}p a {fps} fps ({label}).{note}{extra}"
             self.after(0, lambda message=message: self._live(message))
             self._wait_proc(proc)
-            if not self.stopping and self._switch_to is not None:
+            if not self.stopping and self._has_pending_switch():
                 if live_audio is not None:
                     live_audio.detach()
                 self.proc = None
@@ -2406,7 +3632,7 @@ class App(tk.Tk):
             live_audio.detach()
         self._kill_ffmpeg()
         self._close_progress()
-        if not self.stopping and self._switch_to is not None:
+        if not self.stopping and self._has_pending_switch():
             self.proc = None
             self.video_proc = None
             return "switch"
@@ -2456,17 +3682,18 @@ class App(tk.Tk):
         if self.stopping:
             return False
         now = time.perf_counter()
-        if getattr(self, "_lost_since", None) is None:
+        first = getattr(self, "_lost_since", None) is None
+        if first:
             self._lost_since = now
         if now - self._lost_since > 45:
             return False
         self.after(0, lambda: self.set_status("A tela mudou, retomando a live..."))
-        self._hold_viewers()
-        deadline = time.perf_counter() + 1.5
+        pause = 0.25 if first else 0.6
+        deadline = time.perf_counter() + pause
         while time.perf_counter() < deadline:
             if self.stopping:
                 return False
-            time.sleep(0.2)
+            time.sleep(0.1)
         return not self.stopping
 
     def _hold_viewers(self):
@@ -2488,8 +3715,11 @@ class App(tk.Tk):
         if self.stopping:
             return
         self._lost_since = None
+        self._base_status = text
+        self._slow_net = False
+        self._slow_streak = 0
         self.button.config(text="Parar")
-        self.set_status(text)
+        self._refresh_live_status()
         self._paint_presence(True)
         self._send_thumb()
 
@@ -2531,11 +3761,18 @@ class App(tk.Tk):
         if self._in_tray:
             self._restore_from_tray()
         if not self.stopping:
-            messagebox.showerror("Spartan Live", message)
+            QMessageBox.critical(self, "Spartan Live", message)
 
     def _audio_changed(self):
         if not getattr(self, "status", None):
             return
+        job = getattr(self, "_audio_debounce_job", None)
+        if job:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+            self._audio_debounce_job = None
         try:
             self.save_settings()
         except Exception:
@@ -2543,9 +3780,27 @@ class App(tk.Tk):
         audio = self.audio_live
         if not self.running or audio is None:
             return
+        target_pc = self.selected_pc_audio()
+        target_mic = self.selected_mic()
+        if target_pc == getattr(audio, "pc_name", "") and target_mic == getattr(audio, "mic_name", ""):
+            return
         try:
-            audio.retarget(self.selected_pc_audio(), self.selected_mic())
-            log_event(f"som pc={self.selected_pc_audio() or '-'} mic={self.selected_mic() or '-'}")
+            self._audio_debounce_job = self.after(3000, self._apply_audio_changed)
+        except Exception:
+            self._apply_audio_changed()
+
+    def _apply_audio_changed(self):
+        self._audio_debounce_job = None
+        audio = self.audio_live
+        if not self.running or audio is None:
+            return
+        target_pc = self.selected_pc_audio()
+        target_mic = self.selected_mic()
+        if target_pc == getattr(audio, "pc_name", "") and target_mic == getattr(audio, "mic_name", ""):
+            return
+        try:
+            audio.retarget(target_pc, target_mic)
+            log_event(f"som pc={target_pc or '-'} mic={target_mic or '-'}")
             self.set_status("Som atualizado na live.")
         except Exception as error:
             self.set_status(f"Não troquei o som: {error}")
@@ -2560,6 +3815,18 @@ class App(tk.Tk):
         notify_stopped(host, nick, self.publish.get("user", ""), self.publish.get("password", ""))
 
     def destroy(self):
+        try:
+            QApplication.instance().removeEventFilter(self)
+        except Exception:
+            pass
+        try:
+            self.save_settings()
+        except Exception:
+            pass
+        for tid in list(self._timers.keys()):
+            self.after_cancel(tid)
+        for attr in ("_tray_job", "_screen_debounce_job", "_audio_debounce_job"):
+            setattr(self, attr, None)
         self._hide_tray()
         tray = self._tray_hwnd
         self._tray_hwnd = None
@@ -2569,10 +3836,18 @@ class App(tk.Tk):
             user32.DestroyWindow(tray)
         if self.running:
             self.stop()
-        super().destroy()
+        self.close()
+
+    def mainloop(self):
+        QApplication.instance().exec()
 
     def stop(self):
         self._switch_to = None
+        self._switch_quality = None
+        self._base_status = ""
+        self._slow_net = False
+        self._slow_streak = 0
+        self._viewers_count = 0
         self._signal_stop()
         self.stopping = True
         self.running = False
