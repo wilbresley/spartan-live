@@ -201,3 +201,11 @@ export function pickNextGif(list, currentIndex) {
   const nextIndex = nextCycleIndex(currentIndex, items.length);
   return { index: nextIndex, src: items[nextIndex] };
 }
+
+export function pairStacks(count, viewWidth, screenWidth) {
+  if (Number(count) !== 2) return false;
+  const view = Number(viewWidth);
+  const screen = Number(screenWidth);
+  if (!Number.isFinite(view) || !Number.isFinite(screen) || screen <= 0) return false;
+  return view < screen * 0.5;
+}

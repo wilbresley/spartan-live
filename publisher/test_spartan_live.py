@@ -47,6 +47,7 @@ from spartan_live import (
     chosen_pc_audio,
     clean_host,
     encoder_args,
+    monitor_within_ceiling,
     parse_quality,
     explain_error,
     prune_log_text,
@@ -60,9 +61,11 @@ from spartan_live import (
     icon_content_box,
     presence_icon,
     resize_hit_test,
+    scale_filter,
     scroll_bars_needed,
     taskbar_exstyle,
     tray_action,
+    size_hold,
     startup_command,
     system_default_playback,
     usable_encoders,
@@ -181,6 +184,50 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(command[-1], "rtmp://servidor/nick")
         self.assertNotIn("-thread_queue_size", command)
         self.assertNotIn("-fps_mode:v", command)
+
+    def test_tela_grande_reduz_na_placa_e_janela_espera_o_tamanho(self):
+        wide = {"left": 0, "top": 0, "width": 2560, "height": 1440}
+        command = build_command(
+            "ffmpeg.exe", "ddagrab", "h264_nvenc", 60, wide, 0, "rtmp://servidor/nick",
+            gpu_scale="amf",
+        )
+        video_filter = command[command.index("-filter:v") + 1]
+        self.assertIn("vpp_amf=w=1920:h=1080", video_filter)
+        self.assertIn("hwdownload", video_filter)
+        self.assertNotIn("lanczos", video_filter)
+        four_k = build_command(
+            "ffmpeg.exe", "ddagrab", "h264_nvenc", 60,
+            {"left": 0, "top": 0, "width": 3840, "height": 2160},
+            0, "rtmp://servidor/nick", gpu_scale="cuda",
+        )
+        four_filter = four_k[four_k.index("-filter:v") + 1]
+        self.assertIn("scale_cuda=w=1920:h=1080", four_filter)
+        beyond = build_command(
+            "ffmpeg.exe", "ddagrab", "h264_nvenc", 60,
+            {"left": 0, "top": 0, "width": 7680, "height": 4320},
+            0, "rtmp://servidor/nick", gpu_scale="amf",
+        )
+        beyond_filter = beyond[beyond.index("-filter:v") + 1]
+        self.assertIn("lanczos", beyond_filter)
+        self.assertNotIn("vpp_amf", beyond_filter)
+        self.assertFalse(monitor_within_ceiling(7680, 4320))
+        self.assertTrue(monitor_within_ceiling(3840, 2160))
+        same = build_command(
+            "ffmpeg.exe", "ddagrab", "h264_nvenc", 60,
+            {"left": 0, "top": 0, "width": 1920, "height": 1080},
+            0, "rtmp://servidor/nick", gpu_scale="amf",
+        )
+        self.assertIn("lanczos", same[same.index("-filter:v") + 1])
+        window = scale_filter(1920, 1080, "window", 2560, 1440, "amf")
+        self.assertEqual(window, "format=yuv420p")
+        sample, since, settled = size_hold((1500, 600), 0.0, 1500, 600, 2.9)
+        self.assertIsNone(settled)
+        sample, since, settled = size_hold(sample, since, 1920, 1080, 3.0)
+        self.assertIsNone(settled)
+        _sample, _since, settled = size_hold(sample, since, 1920, 1080, 6.0)
+        self.assertEqual(settled, (1920, 1080))
+        _sample, _since, settled = size_hold((1920, 1080), 0.0, 0, 0, 10.0)
+        self.assertIsNone(settled)
 
     def test_ponteiro_usa_o_ddagrab_na_tela_certa(self):
         self.assertEqual(prefer_capture(" .. ddagrab           |->V       Grab\n"), "ddagrab")

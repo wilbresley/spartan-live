@@ -122,7 +122,7 @@ O encoder usado é o primeiro que responder, nesta ordem: `h264_nvenc`, `h264_am
 | 720p 30 | 5 Mbps | 4 Mbps |
 | 480p 30 | 1,5 Mbps | 1,5 Mbps |
 
-A tela entra pelo filtro `ddagrab`, o monitor inteiro, com o ponteiro real, e só então é reduzida para a qualidade escolhida. Se essa captura não abrir, usa `gdigrab`. A janela é encaixada nesse quadro quando a captura abre. Em modo janela/jogo, os quadros BGRA entram por um *named pipe* (`\\.\pipe\spartan-vid-...`) com `-use_wallclock_as_timestamps 1` para o mesmo processo isolado de vídeo. O vídeo segue sozinho em MPEG-TS. O som do PC (ou o som isolado do processo da janela/jogo) e o microfone são lidos no Windows, reamostrados com soxr para 48 kHz estéreo, somados em ponto flutuante e entregues em blocos de 20 ms. O segundo processo copia o vídeo e grava AAC a 256 kbps. O deslocamento na junção é zero.
+A tela entra pelo filtro `ddagrab`, o monitor inteiro, com o ponteiro real. Se o monitor for maior que a qualidade escolhida e couber em 4K (3840×2160), a placa reduz o quadro para 1080p ou 720p antes de copiá-lo. Monitor acima de 4K continua sendo reduzido na memória. Se o `ddagrab` não abrir, usa `gdigrab`. A janela entra encaixada nesse quadro. Quando o tamanho dela muda, inclusive ao ir para tela cheia, a live espera 3 segundos com a medida parada e encaixa a janela inteira de novo, sem trocar a resolução da transmissão. Em modo janela/jogo, os quadros BGRA entram por um *named pipe* (`\\.\pipe\spartan-vid-...`) com `-use_wallclock_as_timestamps 1` para o mesmo processo isolado de vídeo. O vídeo segue sozinho em MPEG-TS. O som do PC (ou o som isolado do processo da janela/jogo) e o microfone são lidos no Windows, reamostrados com soxr para 48 kHz estéreo, somados em ponto flutuante e entregues em blocos de 20 ms. O segundo processo copia o vídeo e grava AAC a 256 kbps. O deslocamento na junção é zero.
 
 O player usa `liveSyncDuration` 1.5, `maxLiveSyncPlaybackRate` 1 e `maxAudioFramesDrift` 10.
 
@@ -161,7 +161,7 @@ O botão de modo teatro, ou a tecla T, esconde o topo na hora. Com uma live toca
 
 Um apelido na lista coloca o quadro parado. O vídeo só baixa no play. Clicar de novo no apelido, ou no X do quadro, remove o player. O X não encerra a transmissão.
 
-Uma live ocupa a área. Duas ou mais ficam em duas colunas iguais, com a imagem inteira no quadro. Cada quadro mostra o apelido no topo, centralizado, o tempo todo, para distinguir lives do mesmo jogo. Clicar no quadro amplia. Clicar de novo, ou Esc, volta à grade. A grade e cada quadro têm tela cheia.
+Uma live ocupa a área. Duas lives ficam lado a lado enquanto a janela do navegador tem pelo menos metade da largura do monitor. Abaixo disso, ficam uma sobre a outra, para a imagem 16:9 usar a largura e sobrar menos tarja. Três ou mais continuam em duas colunas. Cada quadro mostra o apelido no topo, centralizado, o tempo todo, para distinguir lives do mesmo jogo. Clicar no quadro amplia. Clicar de novo, ou Esc, volta à grade. A grade e cada quadro têm tela cheia.
 
 A reprodução começa muda. O volume vai de 0% a 200%, de 5 em 5 (acima de 100% amplifica via `GainNode` da Web Audio API). Mutar guarda o último nível. No navegador, o volume salvo por apelido fica limitado a no máximo 100%, e ao iniciar o play o volume nunca passa de 100% para proteger quem usa fone de ouvido.
 

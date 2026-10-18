@@ -15,6 +15,7 @@ import {
   dismissActiveToast,
   enqueueArrivalToasts,
   pickNextGif,
+  pairStacks,
   readPeerVolume,
   savePeerVolume,
   shouldUseArrivalToast,
@@ -176,6 +177,11 @@ arrivalToast.addEventListener("click", (event) => {
 
 document.addEventListener("fullscreenchange", () => {
   syncToastMount();
+  resizePeers();
+});
+
+window.addEventListener("resize", () => {
+  if (visibleCount() === 2) resizePeers();
 });
 
 window.setInterval(() => {
@@ -478,6 +484,11 @@ function resizePeers() {
   peersEl.classList.remove("peers-split");
   const count = visibleCount();
   if (count <= 1) return;
+  if (pairStacks(count, window.innerWidth, window.screen?.width || 0)) {
+    peersEl.style.gridTemplateColumns = "1fr";
+    peersEl.style.gridTemplateRows = "1fr 1fr";
+    return;
+  }
   const slots = Math.min(50, count + (count % 2));
   peersEl.style.gridTemplateColumns = "1fr 1fr";
   peersEl.style.gridTemplateRows = `repeat(${slots / 2}, minmax(0, 1fr))`;

@@ -16,6 +16,7 @@ import {
   dropViewer,
   enqueueArrivalToasts,
   pickNextGif,
+  pairStacks,
   readPeerVolume,
   savePeerVolume,
   shouldUseArrivalToast,
@@ -151,4 +152,13 @@ test("roleta de gifs de triste e feliz percorre todos os itens sem repetir até 
   }
   assert.equal(new Set(seenHappy).size, HAPPY_GIFS.length);
   assert.equal(pickNextGif(HAPPY_GIFS, hIdx).src, HAPPY_GIFS[0]);
+});
+
+test("duas lives ficam uma sobre a outra só abaixo da metade do monitor", () => {
+  assert.equal(pairStacks(2, 900, 1920), true);
+  assert.equal(pairStacks(2, 960, 1920), false);
+  assert.equal(pairStacks(2, 1600, 1920), false);
+  assert.equal(pairStacks(1, 400, 1920), false);
+  assert.equal(pairStacks(3, 400, 1920), false);
+  assert.equal(pairStacks(2, 400, 0), false);
 });

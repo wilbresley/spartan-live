@@ -905,16 +905,110 @@ def encoder_args(encoder, fps, height=1080):
     return ["-c:v", "libx264", "-preset", preset, "-tune", "zerolatency", "-profile:v", "high", *common]
 
 
-def scale_filter(width=1920, height=1080, mode="gdigrab"):
+CAPTURE_CEILING_W = 3840
+CAPTURE_CEILING_H = 2160
+WINDOW_SIZE_SETTLE = 3.0
+
+
+def monitor_within_ceiling(width, height):
+    """4K é o maior monitor que a redução na placa precisa aguentar."""
+    try:
+        width = int(width)
+        height = int(height)
+    except (TypeError, ValueError):
+        return False
+    return 0 < width <= CAPTURE_CEILING_W and 0 < height <= CAPTURE_CEILING_H
+
+
+def fitted_even_size(src_w, src_h, dst_w, dst_h):
+    _x, _y, fw, fh = fit_aspect_box(src_w, src_h, dst_w, dst_h)
+    return max(2, int(fw) - (int(fw) % 2)), max(2, int(fh) - (int(fh) % 2))
+
+
+def scale_filter(width=1920, height=1080, mode="gdigrab", source_w=0, source_h=0, gpu=""):
     if mode == "window":
         return "format=yuv420p"
-    scale = (
+    width = max(2, int(width))
+    height = max(2, int(height))
+    cpu = (
         f"scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos,"
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p"
     )
-    if mode == "ddagrab":
-        return f"hwdownload,format=bgra,{scale}"
-    return scale
+    if mode != "ddagrab":
+        return cpu
+    try:
+        source_w = int(source_w)
+        source_h = int(source_h)
+    except (TypeError, ValueError):
+        source_w = source_h = 0
+    shrinks = source_w > width or source_h > height
+    if gpu not in ("amf", "cuda", "qsv") or not shrinks or not monitor_within_ceiling(source_w, source_h):
+        return f"hwdownload,format=bgra,{cpu}"
+    fw, fh = fitted_even_size(source_w, source_h, width, height)
+    if gpu == "amf":
+        head = f"vpp_amf=w={fw}:h={fh}:format=nv12,hwdownload,format=nv12"
+    elif gpu == "cuda":
+        head = f"hwmap=derive_device=cuda,scale_cuda=w={fw}:h={fh}:format=nv12,hwdownload,format=nv12"
+    else:
+        head = f"hwmap=derive_device=qsv,scale_qsv=w={fw}:h={fh}:format=nv12,hwdownload,format=nv12"
+    return f"{head},pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p"
+
+
+def gpu_scale_works(ffmpeg, video_filter):
+    proc = subprocess.Popen(
+        [
+            ffmpeg, "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "ddagrab=output_idx=0:framerate=30:draw_mouse=0",
+            "-vf", video_filter,
+            "-frames:v", "1", "-f", "null", "-",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    try:
+        return proc.wait(timeout=8) == 0
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=3)
+        return False
+    except OSError:
+        return False
+
+
+def probe_gpu_scale(ffmpeg):
+    """A placa que está desenhando a tela reduz o quadro antes da cópia. Senão, segue na memória."""
+    trials = (
+        ("amf", "vpp_amf=w=640:h=360:format=nv12,hwdownload,format=nv12,format=yuv420p"),
+        ("cuda", "hwmap=derive_device=cuda,scale_cuda=w=640:h=360:format=nv12,hwdownload,format=nv12,format=yuv420p"),
+        ("qsv", "hwmap=derive_device=qsv,scale_qsv=w=640:h=360:format=nv12,hwdownload,format=nv12,format=yuv420p"),
+    )
+    for kind, video_filter in trials:
+        try:
+            if gpu_scale_works(ffmpeg, video_filter):
+                return kind
+        except Exception:
+            continue
+    return ""
+
+
+def size_hold(sample, since, width, height, now, wait=WINDOW_SIZE_SETTLE):
+    """O tamanho novo da janela só vale depois de ficar parado. Arrastar recomeça a espera."""
+    try:
+        width = int(width)
+        height = int(height)
+        now = float(now)
+        wait = float(wait)
+    except (TypeError, ValueError):
+        return sample, since, None
+    if width <= 8 or height <= 8:
+        return sample, since, None
+    size = (width, height)
+    if size != sample or since is None:
+        return size, now, None
+    if now - float(since) < wait:
+        return size, since, None
+    return size, since, size
 
 
 def prefer_capture(filter_listing):
@@ -1059,7 +1153,7 @@ def wav_header():
     )
 
 
-def build_command(ffmpeg, mode, encoder, fps, monitor, output_idx, rtmp, with_audio=False, width=1920, height=1080, relay=None):
+def build_command(ffmpeg, mode, encoder, fps, monitor, output_idx, rtmp, with_audio=False, width=1920, height=1080, relay=None, gpu_scale=""):
     command = [
         ffmpeg,
         "-hide_banner",
@@ -1072,7 +1166,12 @@ def build_command(ffmpeg, mode, encoder, fps, monitor, output_idx, rtmp, with_au
         command.append("1")
     command += [
         *capture_input(mode, fps, monitor, output_idx, width, height),
-        "-filter:v", scale_filter(width, height, mode),
+        "-filter:v", scale_filter(
+            width, height, mode,
+            monitor.get("width", 0) if isinstance(monitor, dict) else 0,
+            monitor.get("height", 0) if isinstance(monitor, dict) else 0,
+            gpu_scale if mode == "ddagrab" else "",
+        ),
         *encoder_args(encoder, fps, height),
     ]
     if with_audio:
@@ -2096,6 +2195,24 @@ class WindowVideoFeeder:
         wgc = _WGCWindowGrabber(self.hwnd)
         use_wgc = wgc.open()
 
+        def client_size():
+            box = RECT()
+            cw = ch = 0
+            if user32.GetClientRect(self.hwnd, ctypes.byref(box)):
+                cw = int(box.right - box.left)
+                ch = int(box.bottom - box.top)
+            if cw <= 8 or ch <= 8:
+                frame = RECT()
+                if user32.GetWindowRect(self.hwnd, ctypes.byref(frame)):
+                    cw = int(frame.right - frame.left)
+                    ch = int(frame.bottom - frame.top)
+            return cw, ch
+
+        opened_w, opened_h = client_size()
+        size_sample = (opened_w, opened_h) if opened_w > 8 and opened_h > 8 else (0, 0)
+        size_since = time.perf_counter()
+        fitted_size = size_sample if size_sample != (0, 0) else None
+
         interval = 1.0 / float(self.fps)
         next_at = time.perf_counter()
         wrote = wintypes.DWORD(0)
@@ -2121,6 +2238,14 @@ class WindowVideoFeeder:
                     self._candidate_hwnd = 0
                     self._candidate_since = 0.0
                     self._waiting_note = False
+                    cw, ch = client_size()
+                    size_sample, size_since, settled = size_hold(size_sample, size_since, cw, ch, now)
+                    if use_wgc and settled and settled != fitted_size:
+                        wgc.close()
+                        wgc = _WGCWindowGrabber(self.hwnd)
+                        use_wgc = wgc.open()
+                        fitted_size = settled
+                        src_size = (0, 0)
                     if use_wgc:
                         grabbed = wgc.grab_into_hdc(dst_dc, self.width, self.height, ctypes.byref(bmi), dst_bits.value)
                         if grabbed:
@@ -2200,6 +2325,10 @@ class WindowVideoFeeder:
                             wgc = _WGCWindowGrabber(self.hwnd)
                             use_wgc = wgc.open()
                             src_size = (0, 0)
+                            fresh_w, fresh_h = client_size()
+                            size_sample = (fresh_w, fresh_h) if fresh_w > 8 and fresh_h > 8 else (0, 0)
+                            size_since = now
+                            fitted_size = size_sample if size_sample != (0, 0) else None
                             self._gone_at = None
                             self._frozen = None
                             self._candidate_hwnd = 0
@@ -5421,7 +5550,8 @@ class App(QWidget):
         else:
             note = ""
         self._capture_mode = prefer_capture(ffmpeg_filters(ffmpeg))
-        log_event(f"captura {self._capture_mode}")
+        self._gpu_scale = probe_gpu_scale(ffmpeg) if self._capture_mode == "ddagrab" else ""
+        log_event(f"captura {self._capture_mode} escala={self._gpu_scale or 'memoria'}")
         preferred = None
         try:
             while not self.stopping:
@@ -5453,6 +5583,20 @@ class App(QWidget):
                         ffmpeg, mode, encoder, fps, monitor, output_idx, url,
                         live_audio, note, width, height,
                     )
+                    if (
+                        outcome is False
+                        and not is_window
+                        and mode == "ddagrab"
+                        and getattr(self, "_gpu_scale", "")
+                        and not self._frame_seen
+                        and not self.stopping
+                    ):
+                        log_event("reducao na placa falhou, seguindo na memoria")
+                        self._gpu_scale = ""
+                        outcome = self._open_capture(
+                            ffmpeg, mode, encoder, fps, monitor, output_idx, url,
+                            live_audio, note, width, height,
+                        )
                     if (
                         outcome is False
                         and not is_window
@@ -5869,6 +6013,7 @@ class App(QWidget):
             if live_audio is None:
                 command = build_command(
                     ffmpeg, mode, encoder, fps, mon, output_idx, url, False, width, height,
+                    gpu_scale=getattr(self, "_gpu_scale", "") if mode == "ddagrab" else "",
                 )
                 return self._attempt(command, encoder, fps, mode, None, note, width, height)
             port = 20000 + ((os.getpid() + self._av_ticket) % 20000)
@@ -5876,6 +6021,7 @@ class App(QWidget):
             pipe = rf"\\.\pipe\spartan-live-{os.getpid()}-{self._av_ticket}"
             video = build_command(
                 ffmpeg, mode, encoder, fps, mon, output_idx, url, True, width, height, relay,
+                gpu_scale=getattr(self, "_gpu_scale", "") if mode == "ddagrab" else "",
             )
             return self._attempt_synced(
                 video, pipe, relay, url, encoder, fps, live_audio, note, width, height, mode,
