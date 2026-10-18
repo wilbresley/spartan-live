@@ -9,6 +9,7 @@ import {
   TOAST_DURATION_MS,
   capPlayStartVolume,
   clampVolumeStep,
+  audienceMarks,
   countViewers,
   createTheaterState,
   createToastQueue,
@@ -117,6 +118,13 @@ test("balão de chegada entra em fila de 3s sem encavalar quando teatro ou tela 
   queue = tickToastQueue(queue, 8000, 3000);
   assert.equal(queue.active, null);
   assert.deepEqual(queue.queue, []);
+});
+
+test("olho conta a conta logada e a ampulheta conta o link temporário", () => {
+  assert.equal(audienceMarks(2, 0), "👁 2");
+  assert.equal(audienceMarks(0, 3), "⏳ 3");
+  assert.equal(audienceMarks(1, 4), "👁 1  ⏳ 4");
+  assert.equal(audienceMarks(0, 0), "");
 });
 
 test("contador de espectadores soma quem está assistindo, remove na hora ao pausar/sair e expira quem saiu", () => {

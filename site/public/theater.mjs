@@ -174,6 +174,15 @@ export function dropViewer(book, name, viewerId) {
   if (room.size === 0) book.delete(name);
 }
 
+export function audienceMarks(viewers, guests) {
+  const account = Math.max(0, Number(viewers) || 0);
+  const temporary = Math.max(0, Number(guests) || 0);
+  const parts = [];
+  if (account > 0) parts.push(`👁 ${account}`);
+  if (temporary > 0) parts.push(`⏳ ${temporary}`);
+  return parts.join("  ");
+}
+
 export function countViewers(book, name, now = Date.now(), ttlMs = VIEWER_TTL_MS) {
   const room = book.get(name);
   if (!room) return 0;

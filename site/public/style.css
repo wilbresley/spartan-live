@@ -164,6 +164,81 @@ header {
   gap: 8px;
 }
 
+#guest-tools,
+#guest-hours {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+body[data-guest="1"] #guest-generate,
+body[data-guest="1"] #guest-hours,
+body[data-guest="1"] #guest-copy,
+body[data-guest="1"] #guest-revoke,
+body[data-guest="1"] #gear-password,
+body[data-guest="1"] #download,
+body[data-guest="1"] #download-note,
+#guest-tools .hidden {
+  display: none;
+}
+
+#guest-generate,
+#guest-hours button,
+#guest-revoke,
+#guest-copy,
+#guest-clock {
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: 14px;
+  line-height: 30px;
+}
+
+#guest-generate,
+#guest-hours button,
+#guest-revoke {
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--line);
+}
+
+#guest-clock {
+  color: #f6f1f1;
+  background: var(--accent);
+  border: 1px solid var(--accent-2);
+  font-variant-numeric: tabular-nums;
+}
+
+#guest-copy {
+  color: #102416;
+  background: #3dbe6e;
+  border: 1px solid #2d9154;
+  font-weight: 650;
+}
+
+#guest-gone {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  background: #3a3a3a;
+  color: var(--text);
+  text-align: center;
+}
+
+#guest-gone.hidden { display: none; }
+
+#guest-gone img {
+  width: min(280px, 70vw);
+  height: auto;
+}
+
+#guest-gone p {
+  margin: 8px 16px 0;
+  font-size: 22px;
+}
+
 #settings,
 #grid-fullscreen,
 #theater-toggle {
@@ -433,22 +508,31 @@ body.tab-hidden .live-led .led {
   box-shadow: none !important;
 }
 
-.rail-viewers,
-.peer-viewers {
+.audience-pair {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.audience-pair.hidden { display: none; }
+
+.audience-pair > span {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   padding: 2px 7px;
   border-radius: 999px;
   font-size: 11px;
+  line-height: 1.4;
+  white-space: nowrap;
   font-variant-numeric: tabular-nums;
   color: #dcdcdc;
   background: rgba(20, 20, 20, 0.72);
   border: 1px solid var(--line);
 }
 
-.rail-viewers {
-  margin-left: 6px;
+#live-rail .audience-pair > span {
   border: 0;
   background: rgba(255, 255, 255, 0.08);
 }

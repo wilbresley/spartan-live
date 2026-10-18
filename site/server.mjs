@@ -5,7 +5,8 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { loadPassword, savePassword, verifyPassword } from "./password.mjs";
-import { countViewers, dropViewer, touchViewer } from "./public/theater.mjs";
+import { countViewers, dropViewer, touchViewer, SAD_GIFS } from "./public/theater.mjs";
+import { createGuest, guestActive } from "./public/guest-link.mjs";
 
 const PORT = Number(process.env.PORT || 8080);
 const VIEWER_USER = process.env.VIEWER_USER || "";
@@ -31,6 +32,7 @@ const GUARD = {
 };
 const DATA_DIR = process.env.DATA_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), "data");
 const PASSWORD_FILE = path.join(DATA_DIR, "password.json");
+const GUEST_FILE = path.join(DATA_DIR, "guest.json");
 const THUMB_DIR = path.join(DATA_DIR, "thumbs");
 const THUMB_MAX = 1_500_000;
 const thumbMiss = new Map();
@@ -38,11 +40,84 @@ const fails = new Map();
 const stoppedUntil = new Map();
 const switchingUntil = new Map();
 const viewersByStream = new Map();
+const guestsByStream = new Map();
 let passwordRecord = null;
 
 function viewerRecord() {
   if (!passwordRecord) passwordRecord = loadPassword(PASSWORD_FILE, VIEWER_USER || "spartan");
   return passwordRecord;
+}
+
+function loadGuest(now = Date.now()) {
+  try {
+    return guestActive(JSON.parse(fs.readFileSync(GUEST_FILE, "utf8")), now);
+  } catch {
+    return null;
+  }
+}
+
+function saveGuest(record) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const temp = `${GUEST_FILE}.tmp`;
+  fs.writeFileSync(temp, JSON.stringify(record), { mode: 0o600 });
+  fs.renameSync(temp, GUEST_FILE);
+}
+
+function clearGuest() {
+  try {
+    fs.unlinkSync(GUEST_FILE);
+  } catch {
+    /* o convite já não estava no disco */
+  }
+}
+
+function openSession(req, now = Date.now()) {
+  const data = readSession(cookies(req)[COOKIE], now);
+  if (!data) return { session: null, guestEnded: false };
+  if (data.role !== "guest") return { session: data, guestEnded: false };
+  const invite = loadGuest(now);
+  if (invite && invite.id === data.gid && data.exp >= now) return { session: data, guestEnded: false };
+  return { session: null, guestEnded: true };
+}
+
+function sessionFrom(req) {
+  return openSession(req).session;
+}
+
+function sendGuestGone(res) {
+  const html = `<!DOCTYPE html>
+<meta charset="utf-8">
+<title>Spartan Live</title>
+<style>
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #3a3a3a; color: #ececec; font-family: "Segoe UI", sans-serif; text-align: center; }
+  img { width: min(280px, 70vw); height: auto; }
+  p { margin: 16px; font-size: 22px; }
+</style>
+<main>
+  <div>
+    <img id="gif" src="${SAD_GIFS[0]}" alt="">
+    <p>Esse link não existe mais.</p>
+  </div>
+</main>
+<script>
+  const gifs = ${JSON.stringify(SAD_GIFS)};
+  let i = 0;
+  setInterval(() => {
+    i = (i + 1) % gifs.length;
+    document.querySelector("#gif").src = gifs[i];
+  }, 4000);
+</script>`;
+  res.writeHead(200, {
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "no-store",
+    ...GUARD,
+  });
+  res.end(html);
+}
+
+function guestPayload(invite) {
+  if (!invite) return { active: false };
+  return { active: true, exp: invite.exp, hours: invite.hours, path: `/v/${invite.id}` };
 }
 
 function publisherAllowed(body) {
@@ -60,6 +135,7 @@ const STATIC = {
   "/screen-switch.mjs": { file: "screen-switch.mjs", type: "text/javascript; charset=utf-8", cache: "no-cache" },
   "/quick-return.mjs": { file: "quick-return.mjs", type: "text/javascript; charset=utf-8", cache: "no-cache" },
   "/theater.mjs": { file: "theater.mjs", type: "text/javascript; charset=utf-8", cache: "no-cache" },
+  "/guest-link.mjs": { file: "guest-link.mjs", type: "text/javascript; charset=utf-8", cache: "no-cache" },
   "/style.css": { file: "style.css", type: "text/css; charset=utf-8", cache: "no-cache" },
   "/entrar.mp3": { file: "entrar.mp3", type: "audio/mpeg", cache: "public, max-age=86400" },
   "/sair.mp3": { file: "sair.mp3", type: "audio/mpeg", cache: "public, max-age=86400" },
@@ -68,7 +144,7 @@ const STATIC = {
   "/pause.png": { file: "pause.png", type: "image/png", cache: "no-cache" },
   "/empty-sad.gif": { file: "empty-sad.gif", type: "image/gif", cache: "public, max-age=86400" },
   ...Object.fromEntries(
-    Array.from({ length: 10 }, (_, idx) => [
+    Array.from({ length: 12 }, (_, idx) => [
       `/gifs/sad-${idx + 1}.gif`,
       { file: `gifs/sad-${idx + 1}.gif`, type: "image/gif", cache: "public, max-age=86400" },
     ])
@@ -88,8 +164,14 @@ export function passwordsMatch(input, expected) {
   return crypto.timingSafeEqual(a, b);
 }
 
-export function signSession(user, now = Date.now()) {
-  const body = Buffer.from(JSON.stringify({ u: user, exp: now + SESSION_MS })).toString("base64url");
+export function signSession(user, now = Date.now(), extra = null) {
+  const payload = { u: user, exp: now + SESSION_MS };
+  if (extra && typeof extra === "object") {
+    if (extra.role) payload.role = extra.role;
+    if (extra.gid) payload.gid = extra.gid;
+    if (typeof extra.exp === "number") payload.exp = extra.exp;
+  }
+  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
   const sig = crypto.createHmac("sha256", SESSION_SECRET).update(body).digest("base64url");
   return `${body}.${sig}`;
 }
@@ -106,7 +188,8 @@ export function readSession(token, now = Date.now()) {
   if (left.length !== right.length || !crypto.timingSafeEqual(left, right)) return null;
   try {
     const data = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
-    if (!data || data.u !== VIEWER_USER || typeof data.exp !== "number" || data.exp < now) return null;
+    if (!data || data.u !== VIEWER_USER || typeof data.exp !== "number") return null;
+    if (data.exp < now && data.role !== "guest") return null;
     return data;
   } catch {
     return null;
@@ -173,6 +256,12 @@ function clientIp(req) {
   return remote || "local";
 }
 
+function watcherKey(req, guest) {
+  const who = guest ? "g" : "o";
+  const agent = String(req.headers["user-agent"] || "").slice(0, 64);
+  return `${who}|${clientIp(req)}|${agent}`;
+}
+
 function trustedProxy(remote) {
   const ip = remote.replace(/^::ffff:/, "");
   if (ip === "127.0.0.1" || ip === "::1") return true;
@@ -180,10 +269,6 @@ function trustedProxy(remote) {
   if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part))) return false;
   if (parts[0] === 10) return true;
   return parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31;
-}
-
-function sessionFrom(req) {
-  return readSession(cookies(req)[COOKIE]);
 }
 
 function sendJson(res, status, body, extraHeaders = {}) {
@@ -197,14 +282,14 @@ function sendJson(res, status, body, extraHeaders = {}) {
   res.end(payload);
 }
 
-function cookieHeader(token, req, clear = false) {
+function cookieHeader(token, req, clear = false, maxAgeSeconds = SESSION_MS / 1000) {
   const https = req.headers["x-forwarded-proto"] === "https" || req.socket.encrypted;
   const parts = [
     `${COOKIE}=${clear ? "" : encodeURIComponent(token)}`,
     "Path=/",
     "HttpOnly",
     "SameSite=Lax",
-    `Max-Age=${clear ? 0 : SESSION_MS / 1000}`,
+    `Max-Age=${clear ? 0 : Math.max(0, Math.floor(maxAgeSeconds))}`,
   ];
   if (https) parts.push("Secure");
   return parts.join("; ");
@@ -517,7 +602,7 @@ async function handleClaim(req, res) {
 
 async function handlePassword(req, res) {
   const session = sessionFrom(req);
-  if (!session) {
+  if (!session || session.role === "guest") {
     sendJson(res, 401, { error: "sem sessao" });
     return;
   }
@@ -604,7 +689,11 @@ async function handle(req, res) {
       sendJson(res, 401, { error: "nao autorizado" });
       return;
     }
-    sendJson(res, 200, { ok: true, viewers: countViewers(viewersByStream, name) });
+    sendJson(res, 200, {
+      ok: true,
+      viewers: countViewers(viewersByStream, name),
+      guests: countViewers(guestsByStream, name),
+    });
     return;
   }
 
@@ -613,14 +702,98 @@ async function handle(req, res) {
     return;
   }
 
-  const session = sessionFrom(req);
+  if (req.method === "GET" && pathname.startsWith("/v/")) {
+    const id = pathname.slice("/v/".length);
+    const invite = /^[\w-]{16,64}$/.test(id) ? loadGuest() : null;
+    if (!invite || invite.id !== id) {
+      sendGuestGone(res);
+      return;
+    }
+    const token = signSession(VIEWER_USER || "spartan", Date.now(), {
+      role: "guest",
+      gid: invite.id,
+      exp: invite.exp,
+    });
+    const left = Math.max(1, Math.ceil((invite.exp - Date.now()) / 1000));
+    res.writeHead(302, {
+      Location: "/",
+      "set-cookie": cookieHeader(token, req, false, left),
+      "cache-control": "no-store",
+      ...GUARD,
+    });
+    res.end();
+    return;
+  }
+
+  const opened = openSession(req);
+  const session = opened.session;
+  const guest = session?.role === "guest";
+
+  function linkEnded() {
+    if (!opened.guestEnded) return false;
+    sendJson(res, 401, { error: "link acabou", guestEnded: true }, {
+      "set-cookie": cookieHeader("", req, true),
+    });
+    return true;
+  }
+
+  function needsLogin() {
+    if (linkEnded()) return true;
+    if (!session) {
+      sendJson(res, 401, { error: "sem sessao" });
+      return true;
+    }
+    return false;
+  }
+
+  function ownerLocked() {
+    if (guest || !viewerRecord().mustChange) return false;
+    sendJson(res, 403, { error: "Troque a senha antes de entrar.", mustChange: true });
+    return true;
+  }
 
   if (req.method === "GET" && pathname === "/api/me") {
-    if (!session) {
+    if (needsLogin()) return;
+    sendJson(res, 200, {
+      user: session.u,
+      role: guest ? "guest" : "owner",
+      mustChange: guest ? false : Boolean(viewerRecord().mustChange),
+      exp: guest ? session.exp : 0,
+    });
+    return;
+  }
+
+  if (pathname === "/api/guest" || pathname === "/api/guest/revoke") {
+    if (linkEnded()) return;
+    if (!session || guest) {
       sendJson(res, 401, { error: "sem sessao" });
       return;
     }
-    sendJson(res, 200, { user: session.u, mustChange: Boolean(viewerRecord().mustChange) });
+    if (req.method === "GET" && pathname === "/api/guest") {
+      sendJson(res, 200, guestPayload(loadGuest()));
+      return;
+    }
+    if (req.method === "POST" && pathname === "/api/guest/revoke") {
+      clearGuest();
+      sendJson(res, 200, { active: false });
+      return;
+    }
+    if (req.method === "POST" && pathname === "/api/guest") {
+      if (loadGuest()) {
+        sendJson(res, 409, { error: "ja existe um link" });
+        return;
+      }
+      const body = await readJson(req);
+      const record = createGuest(body.hours, Date.now(), crypto.randomBytes(18).toString("base64url"));
+      if (!record) {
+        sendJson(res, 400, { error: "prazo invalido" });
+        return;
+      }
+      saveGuest(record);
+      sendJson(res, 200, guestPayload(record));
+      return;
+    }
+    sendJson(res, 405, { error: "metodo invalido" });
     return;
   }
 
@@ -630,46 +803,35 @@ async function handle(req, res) {
   }
 
   if (req.method === "POST" && pathname === "/api/watch") {
-    if (!session) {
-      sendJson(res, 401, { error: "sem sessao" });
-      return;
-    }
+    if (needsLogin()) return;
     const body = await readJson(req);
     const names = Array.isArray(body.names) ? body.names : [];
-    const viewerKey = `${clientIp(req)}|${String(req.headers["user-agent"] || "").slice(0, 64)}`;
+    const viewerKey = watcherKey(req, guest);
     const now = Date.now();
+    const book = guest ? guestsByStream : viewersByStream;
     for (const raw of names) {
       const name = String(raw || "");
-      if (safeStreamName(name)) touchViewer(viewersByStream, name, viewerKey, now);
+      if (safeStreamName(name)) touchViewer(book, name, viewerKey, now);
     }
     sendJson(res, 200, { ok: true });
     return;
   }
 
   if (req.method === "POST" && pathname === "/api/unwatch") {
-    if (!session) {
-      sendJson(res, 401, { error: "sem sessao" });
-      return;
-    }
+    if (needsLogin()) return;
     const body = await readJson(req);
     const name = String(body.name || "");
     if (safeStreamName(name)) {
-      const viewerKey = `${clientIp(req)}|${String(req.headers["user-agent"] || "").slice(0, 64)}`;
+      const viewerKey = watcherKey(req, guest);
       dropViewer(viewersByStream, name, viewerKey);
+      dropViewer(guestsByStream, name, viewerKey);
     }
     sendJson(res, 200, { ok: true });
     return;
   }
 
   if (req.method === "GET" && pathname === "/api/streams") {
-    if (!session) {
-      sendJson(res, 401, { error: "sem sessao" });
-      return;
-    }
-    if (viewerRecord().mustChange) {
-      sendJson(res, 403, { error: "Troque a senha antes de entrar.", mustChange: true });
-      return;
-    }
+    if (needsLogin() || ownerLocked()) return;
     const live = await listStreams();
     const stopped = currentStopped(live);
     const gone = new Set(stopped);
@@ -678,6 +840,7 @@ async function handle(req, res) {
       ...stream,
       thumbAt: thumbStamp(stream.name),
       viewers: countViewers(viewersByStream, stream.name, now),
+      guests: countViewers(guestsByStream, stream.name, now),
     }));
     const switching = collectSwitching(switchingUntil, streams);
     const switchingKinds = collectSwitchKinds(switchingUntil);
@@ -687,14 +850,7 @@ async function handle(req, res) {
   }
 
   if (req.method === "GET" && pathname.startsWith("/hls/")) {
-    if (!session) {
-      sendJson(res, 401, { error: "sem sessao" });
-      return;
-    }
-    if (viewerRecord().mustChange) {
-      sendJson(res, 403, { error: "Troque a senha antes de entrar.", mustChange: true });
-      return;
-    }
+    if (needsLogin() || ownerLocked()) return;
     const pieces = pathname.split("/").filter(Boolean);
     const name = pieces[1] || "";
     const rest = pieces.slice(2).join("/");
@@ -707,14 +863,7 @@ async function handle(req, res) {
   }
 
   if (req.method === "GET" && pathname.startsWith("/api/thumb/")) {
-    if (!session) {
-      sendJson(res, 401, { error: "sem sessao" });
-      return;
-    }
-    if (viewerRecord().mustChange) {
-      sendJson(res, 403, { error: "Troque a senha antes de entrar.", mustChange: true });
-      return;
-    }
+    if (needsLogin() || ownerLocked()) return;
     const name = pathname.slice("/api/thumb/".length);
     const filePath = thumbFile(name);
     if (!filePath || !fs.existsSync(filePath)) {
@@ -733,7 +882,8 @@ async function handle(req, res) {
   }
 
   if ((req.method === "GET" || req.method === "HEAD") && pathname === "/download/SpartanLive.exe") {
-    if (!session) {
+    if (linkEnded()) return;
+    if (!session || guest) {
       sendJson(res, 401, { error: "sem sessao" });
       return;
     }
@@ -777,7 +927,7 @@ async function handle(req, res) {
   sendJson(res, 404, { error: "nao encontrado" });
 }
 
-function onRequest(req, res) {
+export function onRequest(req, res) {
   handle(req, res).catch((error) => {
     const offline = error?.cause?.code === "ECONNREFUSED" || error?.message === "fetch failed";
     const status = error.status || (offline ? 502 : 500);

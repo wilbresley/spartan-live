@@ -21,6 +21,8 @@ from spartan_live import (
     WindowVideoFeeder,
     _QtVar,
     _WGCWindowGrabber,
+    audience_counts,
+    audience_status,
     apply_startup,
     build_command,
     build_mux_command,
@@ -74,6 +76,15 @@ from spartan_live import (
 
 
 class PublisherTests(unittest.TestCase):
+    def test_olho_e_ampulheta_separam_conta_e_link(self):
+        self.assertEqual(audience_counts({"viewers": 2, "guests": 3}), (2, 3))
+        self.assertEqual(audience_counts({"viewers": "4"}), (4, 0))
+        self.assertEqual(audience_counts({}), (0, 0))
+        self.assertEqual(audience_status(2, 0), ["👁 2 assistindo", "⏳ 0 pelo link"])
+        self.assertEqual(audience_status(0, 3), ["👁 0 assistindo", "⏳ 3 pelo link"])
+        self.assertEqual(audience_status(1, 4), ["👁 1 assistindo", "⏳ 4 pelo link"])
+        self.assertEqual(audience_status(0, 0), [])
+
     def test_nick(self):
         self.assertTrue(valid_nick("ana"))
         self.assertFalse(valid_nick("a"))

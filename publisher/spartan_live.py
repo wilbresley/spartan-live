@@ -345,10 +345,29 @@ def upload_thumb(host, nick, user, password, data):
     log_event(f"thumb falhou apelido={nick} {last}")
 
 
+def audience_counts(body):
+    def clean(value):
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    if not isinstance(body, dict):
+        return 0, 0
+    return clean(body.get("viewers")), clean(body.get("guests"))
+
+
+def audience_status(viewers, guests):
+    account, temporary = audience_counts({"viewers": viewers, "guests": guests})
+    if account <= 0 and temporary <= 0:
+        return []
+    return [f"👁 {account} assistindo", f"⏳ {temporary} pelo link"]
+
+
 def fetch_viewers(host, nick, user, password):
     targets = notify_targets(host, "viewers")
     if not targets or not nick or not user or not password:
-        return 0
+        return 0, 0
     payload = json.dumps({"name": nick, "user": user, "password": password}).encode("utf-8")
     for url in targets:
         request = urllib.request.Request(
@@ -360,10 +379,10 @@ def fetch_viewers(host, nick, user, password):
         try:
             with urllib.request.urlopen(request, timeout=3) as response:
                 body = json.loads(response.read().decode("utf-8", "replace"))
-            return max(0, int(body.get("viewers") or 0))
+            return audience_counts(body)
         except Exception:
             continue
-    return 0
+    return 0, 0
 
 
 class _JobBasicLimit(ctypes.Structure):
@@ -4432,6 +4451,7 @@ class App(QWidget):
         self._slow_net = False
         self._slow_streak = 0
         self._viewers_count = 0
+        self._guests_count = 0
         self._last_viewer_poll = 0.0
         self._hotkeys_installed = False
         self._window_feeder = None
@@ -5353,8 +5373,8 @@ class App(QWidget):
         if not base or not self.running:
             return base
         parts = [base]
-        if self._viewers_count > 0:
-            parts.append(f"👁 {self._viewers_count} assistindo")
+        if self._viewers_count > 0 or self._guests_count > 0:
+            parts.extend(audience_status(self._viewers_count, self._guests_count))
         if self._mic_muted and self.selected_mic():
             parts.append("Mic mudo")
         if self._slow_net:
@@ -5403,11 +5423,12 @@ class App(QWidget):
                     ).start()
 
     def _poll_viewers_worker(self, host, nick, user, password):
-        count = fetch_viewers(host, nick, user, password)
+        viewers, guests = fetch_viewers(host, nick, user, password)
         if not self.running or self.stopping or self.live_nick != nick:
             return
-        if count != self._viewers_count:
-            self._viewers_count = count
+        if viewers != self._viewers_count or guests != self._guests_count:
+            self._viewers_count = viewers
+            self._guests_count = guests
             self.after(0, self._refresh_live_status)
 
     def _current_window_geom(self):
@@ -6365,6 +6386,7 @@ class App(QWidget):
         self._slow_net = False
         self._slow_streak = 0
         self._viewers_count = 0
+        self._guests_count = 0
         self._signal_stop()
         self.stopping = True
         self.running = False

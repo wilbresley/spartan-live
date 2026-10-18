@@ -46,6 +46,18 @@
         <span id="count" class="muted"></span>
       </div>
       <div class="header-actions">
+        <div id="guest-tools">
+          <button id="guest-generate" type="button">Gerar link</button>
+          <div id="guest-hours" class="hidden">
+            <button type="button" data-hours="3">3h</button>
+            <button type="button" data-hours="6">6h</button>
+            <button type="button" data-hours="12">12h</button>
+            <button type="button" data-hours="24">24h</button>
+          </div>
+          <span id="guest-clock" class="hidden" role="status"></span>
+          <button id="guest-copy" type="button" class="hidden">Copiar</button>
+          <button id="guest-revoke" type="button" class="hidden">Revogar</button>
+        </div>
         <button id="theater-toggle" type="button" title="Modo Teatro (T)" aria-label="Modo Teatro">▭</button>
         <button id="grid-fullscreen" type="button" title="Tela cheia do grid" aria-label="Tela cheia do grid">⛶</button>
         <button id="settings" type="button" aria-label="Ajustes">⚙</button>
@@ -87,6 +99,11 @@
         </div>
       </div>
     </div>
+  </section>
+
+  <section id="guest-gone" class="hidden">
+    <img id="guest-gone-gif" src="/gifs/sad-1.gif" alt="" draggable="false">
+    <p>Esse link não existe mais.</p>
   </section>
 
   <script src="/hls.min.js"></script>

@@ -98,6 +98,8 @@ No **Som do PC**, a lista abre em **Dispositivos** e, abaixo, **Janelas e progra
 
 Abaixo de 560×720 aparecem barras de rolagem independentes, vertical, horizontal ou as duas, afastadas da borda para o clique pegar a barra e não o redimensionamento. A roda do mouse rola na vertical. Shift e a roda rolam na horizontal. O volume do PC e o do microfone têm medidor. Trocar a qualidade com a live aberta reinicia só o encoder, no mesmo apelido. A página mostra "Trocando qualidade!" e segue na ponta.
 
+Com a live aberta, a faixa de status mostra os dois contadores, mesmo quando um deles é zero. O olho é quem está logado na conta da página. A ampulheta é quem entrou pelo link temporário.
+
 O apelido tem 2 a 24 caracteres: letras, números, `_` e `-`. Ele é o nome da live.
 
 O campo Servidor aceita IPv4 ou domínio, sem `http://`. O programa remove esquema, caminho e porta escritos ali. O RTMP usa a porta do `publish.json`, 1935. Um IP avisa o site em `http://IP:8097`. Um domínio tenta `https://dominio` e, se falhar, `http://dominio:8097`.
@@ -157,7 +159,7 @@ A lista começa fechada. A escolha fica no navegador. Com a lista fechada, uma l
 
 Sem ninguém ao vivo, a área mostra um GIF triste, um de cada vez, entre os 12 de `site/public/gifs/sad-1.gif` a `sad-12.gif`. Quando entra uma live e a grade ainda está vazia, passa para um GIF feliz, entre os 12 de `happy-1.gif` a `happy-12.gif`. O navegador lembra o ponto da roleta.
 
-O botão de modo teatro, ou a tecla T, esconde o topo na hora. Com uma live tocando e o mouse parado por 30 segundos, o teatro entra sozinho. No teatro manual, encostar no topo mostra a faixa. Esc sai do teatro. Quando entra uma live nova com a lista lateral oculta (modo teatro manual ou automático, tela cheia da grade ou tela cheia de um player), aparece um balão de notificação no canto superior esquerdo por 3 segundos (em fila, um por vez sem encavalar), e clicar no balão já abre e inicia a live da pessoa. O volume de cada apelido fica no navegador. O quadro mostra quantas pessoas estão assistindo. Picture-in-picture fica no controle do player.
+O botão de modo teatro, ou a tecla T, esconde o topo na hora. Com uma live tocando e o mouse parado por 30 segundos, o teatro entra sozinho. No teatro manual, encostar no topo mostra a faixa. Esc sai do teatro. Quando entra uma live nova com a lista lateral oculta (modo teatro manual ou automático, tela cheia da grade ou tela cheia de um player), aparece um balão de notificação no canto superior esquerdo por 3 segundos (em fila, um por vez sem encavalar), e clicar no balão já abre e inicia a live da pessoa. O volume de cada apelido fica no navegador. No quadro e na lista, o olho conta quem entrou com a senha e a ampulheta conta quem entrou pelo link temporário. Os dois ficam lado a lado, olho primeiro, e cada um só aparece se o número for maior que zero. Sem ninguém assistindo, o contador some. Picture-in-picture fica no controle do player.
 
 Um apelido na lista coloca o quadro parado. O vídeo só baixa no play. Clicar de novo no apelido, ou no X do quadro, remove o player. O X não encerra a transmissão.
 
@@ -171,13 +173,17 @@ Parar no programa, ou fechar a janela, avisa o servidor e o apelido sai na hora.
 
 Os sons de entrada e de saída tocam depois do login. A entrada marca uma live que começou. A saída marca uma parada, ou uma queda que passou de 90 segundos. Cada um espera 3 minutos antes de repetir o mesmo apelido. O botão em Ajustes liga e desliga os dois. Ajustes também troca a senha da página e baixa o programa.
 
+À esquerda do teatro, quem está logado gera um link de visita. O prazo é 3, 6, 12 ou 24 horas, contado da criação. Só existe um link por vez. Enquanto ele vale, o relógio vermelho mostra o que falta, o botão verde copia o endereço e Revogar encerra na hora. O endereço copiado usa o site aberto na barra: na rede local sai o IP, no domínio sai o domínio, e o caminho `/v/` é o mesmo. Gerar outro exige revogar o atual, ou esperar ele vencer. Cada geração usa um código novo. Várias pessoas podem abrir o mesmo endereço até ele vencer ou ser revogado.
+
+Quem entra por esse endereço assiste a grade, o volume e o teatro. Não vê o gerador, o download do programa nem a troca de senha. À esquerda do teatro, vê só o tempo que falta no convite. Link vencido, revogado ou desconhecido abre uma tela cinza com os GIFs tristes. Quem já estava assistindo cai nessa tela quando o link acaba.
+
 ## Segurança
 
 A senha da página é scrypt. O cookie de sessão é HttpOnly. Em HTTPS ele também é Secure. Oito senhas erradas no mesmo IP bloqueiam esse IP por 5 minutos.
 
 `X-Forwarded-For` só é aceito quando o pedido chega de um proxy local. Acesso direto na 8097 não escolhe o próprio IP.
 
-O HLS e a lista exigem sessão. Publicar, parar, trocar de tela e enviar a miniatura exigem o usuário e a senha do `publish.json`, distintos do login da página. O nome da live só aceita o mesmo conjunto do apelido.
+O HLS e a lista exigem sessão. Publicar, parar, trocar de tela e enviar a miniatura exigem o usuário e a senha do `publish.json`, distintos do login da página. O nome da live só aceita o mesmo conjunto do apelido. O visitante do link temporário usa o mesmo cookie, com o prazo do convite, e não troca a senha nem baixa o programa. O convite fica em `guest.json`, no volume `spartan-viewer`, um de cada vez.
 
 Ficam fora do git: `.env`, `motor/mediamtx.yml`, `publisher/publish.json`, `publisher/dist/`, `publisher/ffmpeg/`, `publisher/build/` e `download/`.
 
@@ -190,5 +196,5 @@ python -m unittest test_spartan_live.py
 
 ```sh
 cd site
-node --test auth.test.mjs buffer.test.mjs password.test.mjs quick-return.test.mjs rail.test.mjs switch.test.mjs theater.test.mjs
+node --test auth.test.mjs buffer.test.mjs guest-http.test.mjs guest-link.test.mjs password.test.mjs quick-return.test.mjs rail.test.mjs switch.test.mjs theater.test.mjs
 ```
