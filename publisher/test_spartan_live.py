@@ -21,6 +21,7 @@ from spartan_live import (
     WindowVideoFeeder,
     _QtVar,
     _WGCWindowGrabber,
+    reap_retired,
     audience_counts,
     audience_status,
     apply_startup,
@@ -84,6 +85,48 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(audience_status(0, 3), ["👁 0 assistindo", "⏳ 3 pelo link"])
         self.assertEqual(audience_status(1, 4), ["👁 1 assistindo", "⏳ 4 pelo link"])
         self.assertEqual(audience_status(0, 0), [])
+
+    def test_sessao_de_janela_fecha_sem_estar_aberta(self):
+        grabber = _WGCWindowGrabber(0)
+        grabber.close()
+        self.assertFalse(grabber.active)
+        self.assertFalse(grabber._ro_inited)
+
+    def test_troca_solta_o_processo_antigo_sem_fechar_o_cano_da_live(self):
+        class Pipe:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        class Proc:
+            def __init__(self, running):
+                self.stdout = Pipe()
+                self.stderr = Pipe()
+                self._code = None if running else 0
+                self.waited = False
+
+            def poll(self):
+                return self._code
+
+            def wait(self, timeout=None):
+                self.waited = True
+                if self._code is None:
+                    raise subprocess.TimeoutExpired("ffmpeg", timeout)
+                return self._code
+
+        running = Proc(True)
+        done = Proc(False)
+        active = Proc(False)
+        kept = reap_retired([running, done, active], active_ids={id(active)})
+        self.assertEqual(kept, [running, active])
+        self.assertTrue(running.waited)
+        self.assertFalse(done.waited)
+        self.assertFalse(running.stdout.closed)
+        self.assertFalse(running.stderr.closed)
+        self.assertFalse(done.stdout.closed)
+        self.assertFalse(done.stderr.closed)
 
     def test_nick(self):
         self.assertTrue(valid_nick("ana"))

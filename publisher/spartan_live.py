@@ -437,6 +437,30 @@ def assign_kill_with_parent(process, job=None):
     return job
 
 
+def reap_retired(procs, active_ids=()):
+    """Tira da lista o processo que já morreu. Não fecha cano e não mexe no que ainda está no ar."""
+    alive = []
+    for proc in procs:
+        if proc is None:
+            continue
+        if id(proc) in active_ids:
+            alive.append(proc)
+            continue
+        try:
+            running = proc.poll() is None
+        except Exception:
+            continue
+        if not running:
+            continue
+        try:
+            proc.wait(timeout=0)
+        except subprocess.TimeoutExpired:
+            alive.append(proc)
+        except Exception:
+            alive.append(proc)
+    return alive
+
+
 def load_json(path, default):
     try:
         with open(path, "r", encoding="utf-8") as handle:
@@ -502,6 +526,27 @@ def _com(ptr, index, restype, *argtypes):
 def _release(ptr):
     if ptr:
         _com(ptr, 2, ctypes.c_ulong)(ptr)
+
+
+def _winrt_close(ptr):
+    """Fecha o objeto WinRT antes de soltar. Sem isso a sessão de captura fica viva."""
+    if not ptr or not ptr.value:
+        return
+    closable = ctypes.c_void_p()
+    try:
+        hr = _com(ptr, 0, ctypes.c_long, ctypes.POINTER(_GUID), ctypes.POINTER(ctypes.c_void_p))(
+            ptr, ctypes.byref(_guid("30d5a829-7fa4-4026-83bb-d75bae4ea99e")), ctypes.byref(closable),
+        )
+    except Exception:
+        return
+    if hr < 0 or not closable.value:
+        return
+    try:
+        _com(closable, 6, ctypes.c_long)(closable)
+    except Exception:
+        pass
+    finally:
+        _release(closable)
 
 
 def _dxgi_outputs():
@@ -1467,6 +1512,7 @@ class _WGCWindowGrabber:
         self.pool_size = (0, 0)
         self.borderless_ok = False
         self.active = False
+        self._ro_inited = False
 
     def open(self):
         if not self.hwnd:
@@ -1474,7 +1520,10 @@ class _WGCWindowGrabber:
         try:
             combase = ctypes.WinDLL("combase")
             d3d11 = ctypes.WinDLL("d3d11")
-            combase.RoInitialize(1)
+            combase.RoInitialize.argtypes = [ctypes.c_uint32]
+            combase.RoInitialize.restype = ctypes.c_long
+            if combase.RoInitialize(1) >= 0:
+                self._ro_inited = True
             combase.WindowsCreateString.argtypes = [wintypes.LPCWSTR, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)]
             combase.WindowsCreateString.restype = ctypes.c_long
             combase.WindowsDeleteString.argtypes = [ctypes.c_void_p]
@@ -1671,6 +1720,8 @@ class _WGCWindowGrabber:
 
     def close(self):
         self.active = False
+        for attr in ("session", "pool"):
+            _winrt_close(getattr(self, attr, None))
         for attr in ("staging", "session", "pool", "item", "winrt_d3d", "dxgi_dev", "d3d_ctx", "d3d_device"):
             ptr = getattr(self, attr, None)
             if ptr is not None and ptr.value:
@@ -1679,6 +1730,12 @@ class _WGCWindowGrabber:
                 except Exception:
                     pass
                 setattr(self, attr, ctypes.c_void_p())
+        if self._ro_inited:
+            self._ro_inited = False
+            try:
+                ctypes.WinDLL("combase").RoUninitialize()
+            except Exception:
+                pass
 
 
 WINDOW_GONE_GRACE = 2.0
@@ -2389,6 +2446,10 @@ class WindowVideoFeeder:
         handle = self.pipe
         self.pipe = None
         if handle:
+            try:
+                ctypes.windll.kernel32.CancelIoEx(int(handle), None)
+            except Exception:
+                pass
             try:
                 ctypes.windll.kernel32.CloseHandle(int(handle))
             except Exception:
@@ -4441,6 +4502,11 @@ class App(QWidget):
         self._progress_sock = None
         self._av_ticket = 0
         self.reader = None
+        self.video_reader = None
+        self.progress_reader = None
+        self._retired_procs = []
+        self._retired_lock = threading.Lock()
+        self._reaper_started = False
         self.running = False
         self.stopping = False
         self._switch_to = None
@@ -4491,11 +4557,13 @@ class App(QWidget):
         timer.setSingleShot(True)
 
         def _fire():
-            self._timers.pop(tid, None)
+            finished = self._timers.pop(tid, None)
             try:
                 callback()
             except Exception:
                 pass
+            if finished is not None:
+                finished.deleteLater()
 
         timer.timeout.connect(_fire)
         self._timers[tid] = timer
@@ -5925,6 +5993,30 @@ class App(QWidget):
                 continue
         return proc.poll()
 
+    def _retire_proc(self, proc):
+        if proc is None:
+            return
+        with self._retired_lock:
+            self._retired_procs.append(proc)
+            if self._reaper_started:
+                return
+            self._reaper_started = True
+        threading.Thread(target=self._reap_loop, name="spartan-reap", daemon=True).start()
+
+    def _reap_loop(self):
+        while True:
+            time.sleep(0.5)
+            active = set()
+            for proc in (getattr(self, "proc", None), getattr(self, "video_proc", None)):
+                if proc is not None:
+                    active.add(id(proc))
+            with self._retired_lock:
+                pending = list(self._retired_procs)
+            kept = reap_retired(pending, active)
+            with self._retired_lock:
+                fresh = [proc for proc in self._retired_procs if all(proc is not old for old in pending)]
+                self._retired_procs = kept + fresh
+
     def _kill_ffmpeg(self):
         feeder = getattr(self, "_window_feeder", None)
         self._window_feeder = None
@@ -5934,14 +6026,16 @@ class App(QWidget):
             except Exception:
                 pass
         for proc in (getattr(self, "proc", None), getattr(self, "video_proc", None)):
-            if proc is None or proc.poll() is not None:
+            if proc is None:
                 continue
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
+            if proc.poll() is None:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+            self._retire_proc(proc)
 
     def _track_processes(self, *procs):
         previous = getattr(self, "_capture_job", None)
@@ -6094,7 +6188,8 @@ class App(QWidget):
                     started.set()
                 self._note_ffmpeg(text, lines, secret)
 
-        threading.Thread(target=read_video_err, daemon=True).start()
+        self.video_reader = threading.Thread(target=read_video_err, daemon=True)
+        self.video_reader.start()
         self.progress_reader = threading.Thread(target=self._read_progress, args=(video,), daemon=True)
         self.progress_reader.start()
         if not started.wait(4):
