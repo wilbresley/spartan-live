@@ -746,10 +746,11 @@ function addStream(stream) {
   feeder.autoplay = false;
   feeder.playsInline = true;
   feeder.className = "feeder";
+  const nameplate = document.createElement("div");
+  nameplate.className = "peer-name";
+  nameplate.textContent = stream.name;
   const actions = document.createElement("div");
   actions.className = "peer-actions";
-  const title = document.createElement("strong");
-  title.textContent = stream.name;
   const viewersBadge = document.createElement("span");
   viewersBadge.className = "peer-viewers hidden";
   const close = document.createElement("button");
@@ -800,8 +801,9 @@ function addStream(stream) {
   volume.addEventListener("pointerleave", () => {
     window.clearTimeout(hideVolTimer);
     hideVolTimer = window.setTimeout(() => {
+      if (volume.matches(":hover")) return;
       volume.classList.remove("is-open");
-    }, 220);
+    }, 500);
   });
   const snap = document.createElement("button");
   snap.type = "button";
@@ -1164,8 +1166,8 @@ function addStream(stream) {
     removeStream(stream.name);
     refreshGrid();
   });
-  actions.append(title, viewersBadge, close);
-  el.append(video, poster, feeder, offlineNote, switchNote, bigPlay, actions, bar, exitFs);
+  actions.append(viewersBadge, close);
+  el.append(video, poster, feeder, offlineNote, switchNote, bigPlay, nameplate, actions, bar, exitFs);
   peersEl.append(el);
   let link = null;
   function openLink() {

@@ -94,7 +94,7 @@ O programa pede apelido, servidor, tela ou janela/jogo, som do PC, microfone e a
 
 O seletor **Tela** abre um painel visual com **miniaturas ao vivo** separadas em duas seções — **Telas** (`Tela 1 — ...`) e **Janelas e Programas** (`Janela: Título (jogo.exe)`) — com campo de busca no topo para filtrar pelo nome ou executável e botão **↻ Atualizar**. Na captura de janela/jogo, o programa usa *Windows Graphics Capture* com `IsBorderRequired = False` quando o sistema suporta, ou `PrintWindow` (`PW_RENDERFULLCONTENT`) com desenho do ponteiro real, garantindo captura **sem borda amarela** no Windows 10 e no Windows 11 e sem expor outras telas no `Alt+Tab`.
 
-No **Som do PC**, além do alto-falante inteiro, há a opção **Som da janela / jogo selecionado**, que usa *WASAPI Application Loopback* (`ActivateAudioInterfaceAsync` com `VAD\Process_Loopback` por `PID`) para capturar apenas o áudio daquela janela ou jogo (isolando chamadas do WhatsApp, Discord ou navegador). Ao escolher uma janela no menu **Tela**, o **Som do PC** muda sozinho para **Som da janela / jogo selecionado**; ao voltar para um monitor, ele restaura o alto-falante anterior.
+No **Som do PC**, a lista abre em **Dispositivos** e, abaixo, **Janelas e programas**, com busca. Além do alto-falante inteiro, há a opção **Som da janela / jogo selecionado**, que usa *WASAPI Application Loopback* (`ActivateAudioInterfaceAsync` com `VAD\Process_Loopback` por `PID`) para capturar apenas o áudio da janela ou jogo que está na imagem. Cada programa da lista é uma linha por processo, lembrada pelo executável, então um programa reaberto do mesmo exe continua sendo seguido. A imagem e o som não se trocam sozinhos: dá para deixar a tela inteira e ouvir só um programa, ou a janela de um jogo e o alto-falante.
 
 Abaixo de 560×720 aparecem barras de rolagem independentes, vertical, horizontal ou as duas, afastadas da borda para o clique pegar a barra e não o redimensionamento. A roda do mouse rola na vertical. Shift e a roda rolam na horizontal. O volume do PC e o do microfone têm medidor. Trocar a qualidade com a live aberta reinicia só o encoder, no mesmo apelido. A página mostra "Trocando qualidade!" e segue na ponta.
 
@@ -104,9 +104,9 @@ O campo Servidor aceita IPv4 ou domínio, sem `http://`. O programa remove esque
 
 Apelido, servidor, qualidade, monitor e aparelhos ficam em `%APPDATA%\SpartanLive\config.json`. O log fica em `%APPDATA%\SpartanLive\spartan.log`, por 30 dias, sem senha. A pasta temporária do executável só descompacta o programa.
 
-O som do PC começa no alto-falante padrão. Dá para trocar o som ou o microfone com a live aberta quando ela começou com algum áudio. Os dois em "Sem som" deixam a transmissão sem canal de áudio até a próxima abertura.
+O som do PC começa no alto-falante padrão, ou no programa salvo se ele ainda estiver aberto. Dá para trocar o dispositivo, o programa ou o microfone com a live aberta. Os dois em "Sem som" deixam a faixa de áudio em silêncio até a pessoa escolher uma fonte, sem parar a live.
 
-Trocar de monitor ou de janela/jogo durante a live reinicia só a captura de vídeo e redireciona o áudio para a nova seleção, no mesmo apelido. A página mostra "Trocando tela!" e segue na ponta.
+Trocar de monitor ou de janela/jogo durante a live reinicia só a captura de vídeo e redireciona o áudio só se o som estiver em "Som da janela / jogo selecionado". A página mostra "Trocando tela!" e segue na ponta. A imagem e o som são independentes: a lista de som abre em Dispositivos e, abaixo, Janelas e programas, com busca. Dá para transmitir a tela inteira e ouvir só um programa. Se o jogo ainda está aberto e a janela some na troca de tela cheia, a live mostra a arte de espera até a janela nova desse mesmo processo ficar estável. Se o programa fecha de verdade, essa janela sai da lista na hora, o campo pede outra tela, o Spartan Live vem para a frente e abre o seletor. A lista se atualiza sozinha enquanto o seletor está aberto. Abrir o programa de novo não volta sozinho para a live: é preciso clicar na janela nova, mesmo que o nome seja igual ao de antes. Minimizar a janela não pede outra tela nem mostra a arte, e a live não passa sozinha para o monitor inteiro. Enquanto a captura moderna da janela está aberta, um instante sem quadro novo repete o último quadro, sem pedir para a janela se redesenhar. Se a imagem fica preta e o programa não está como administrador, ele avisa e oferece abrir de novo elevado. A live sempre sai com faixa de áudio; sem dispositivo e sem microfone, essa faixa leva silêncio, e ligar o som depois não reinicia a transmissão.
 
 Minimizar vai para a bandeja. Parado, o ícone é `assets/Spartan-Live.ico`. Transmitindo, `assets/Spartan-Live-ON.ico`. "Abrir com o Windows, sem iniciar a live" só registra o executável. A live não começa sozinha.
 
@@ -122,7 +122,7 @@ O encoder usado é o primeiro que responder, nesta ordem: `h264_nvenc`, `h264_am
 | 720p 30 | 5 Mbps | 4 Mbps |
 | 480p 30 | 1,5 Mbps | 1,5 Mbps |
 
-A tela entra pelo filtro `ddagrab`, o monitor inteiro, com o ponteiro real. Se essa captura não abrir, usa `gdigrab`. Em modo janela/jogo, os quadros BGRA entram por um *named pipe* (`\\.\pipe\spartan-vid-...`) com `-use_wallclock_as_timestamps 1` para o mesmo processo isolado de vídeo. O vídeo segue sozinho em MPEG-TS. O som do PC (ou o som isolado do processo da janela/jogo) e o microfone são lidos no Windows, reamostrados com soxr para 48 kHz estéreo, somados em ponto flutuante e entregues em blocos de 20 ms. O segundo processo copia o vídeo e grava AAC a 256 kbps. O deslocamento na junção é zero.
+A tela entra pelo filtro `ddagrab`, o monitor inteiro, com o ponteiro real, e só então é reduzida para a qualidade escolhida. Se essa captura não abrir, usa `gdigrab`. A janela é encaixada nesse quadro quando a captura abre. Em modo janela/jogo, os quadros BGRA entram por um *named pipe* (`\\.\pipe\spartan-vid-...`) com `-use_wallclock_as_timestamps 1` para o mesmo processo isolado de vídeo. O vídeo segue sozinho em MPEG-TS. O som do PC (ou o som isolado do processo da janela/jogo) e o microfone são lidos no Windows, reamostrados com soxr para 48 kHz estéreo, somados em ponto flutuante e entregues em blocos de 20 ms. O segundo processo copia o vídeo e grava AAC a 256 kbps. O deslocamento na junção é zero.
 
 O player usa `liveSyncDuration` 1.5, `maxLiveSyncPlaybackRate` 1 e `maxAudioFramesDrift` 10.
 
@@ -161,7 +161,7 @@ O botão de modo teatro, ou a tecla T, esconde o topo na hora. Com uma live toca
 
 Um apelido na lista coloca o quadro parado. O vídeo só baixa no play. Clicar de novo no apelido, ou no X do quadro, remove o player. O X não encerra a transmissão.
 
-Uma live ocupa a área. Duas ou mais ficam em duas colunas iguais, com a imagem inteira no quadro. Clicar no quadro amplia. Clicar de novo, ou Esc, volta à grade. A grade e cada quadro têm tela cheia.
+Uma live ocupa a área. Duas ou mais ficam em duas colunas iguais, com a imagem inteira no quadro. Cada quadro mostra o apelido no topo, centralizado, o tempo todo, para distinguir lives do mesmo jogo. Clicar no quadro amplia. Clicar de novo, ou Esc, volta à grade. A grade e cada quadro têm tela cheia.
 
 A reprodução começa muda. O volume vai de 0% a 200%, de 5 em 5 (acima de 100% amplifica via `GainNode` da Web Audio API). Mutar guarda o último nível. No navegador, o volume salvo por apelido fica limitado a no máximo 100%, e ao iniciar o play o volume nunca passa de 100% para proteger quem usa fone de ouvido.
 

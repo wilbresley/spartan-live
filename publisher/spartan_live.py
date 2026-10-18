@@ -20,7 +20,7 @@ from PySide6.QtCore import Qt, QTimer, QRectF, QPoint, QEvent, QObject, QSize, S
 from PySide6.QtGui import QPainter, QColor, QPen, QFont, QFontMetrics, QPainterPath, QIcon, QCursor, QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QLineEdit, QCheckBox, QScrollArea, QFrame, QMessageBox,
+    QLabel, QLineEdit, QCheckBox, QScrollArea, QFrame, QMessageBox, QPushButton,
 )
 
 import numpy as np
@@ -1169,6 +1169,8 @@ def chosen_pc_audio(saved, devices, system_default):
     """O padrão é o alto-falante do Windows. Um aparelho salvo só vale se ele existir neste PC."""
     if saved == WINDOW_AUDIO_TOKEN:
         return WINDOW_AUDIO_TOKEN
+    if isinstance(saved, str) and saved.startswith("exe:"):
+        return saved
     if saved:
         if saved in devices:
             return saved
@@ -1534,24 +1536,10 @@ class _WGCWindowGrabber:
             )(self.d3d_ctx, self.staging, 0, 1, 0, ctypes.byref(mapped)) < 0 or not mapped.pData:
                 return False
             try:
-                if tw == dst_w and th == dst_h and int(mapped.RowPitch) == dst_w * 4:
-                    ctypes.memmove(dst_bits_ptr, mapped.pData, dst_w * dst_h * 4)
-                else:
-                    scale = min(dst_w / float(tw), dst_h / float(th))
-                    fit_w = max(2, min(dst_w, int(round(tw * scale))))
-                    fit_h = max(2, min(dst_h, int(round(th * scale))))
-                    off_x = (dst_w - fit_w) // 2
-                    off_y = (dst_h - fit_h) // 2
-                    ctypes.memset(dst_bits_ptr, 0, dst_w * dst_h * 4)
-                    src_arr = np.ctypeslib.as_array(
-                        (ctypes.c_uint32 * ((int(mapped.RowPitch) // 4) * th)).from_address(mapped.pData)
-                    ).reshape((th, int(mapped.RowPitch) // 4))[:, :tw]
-                    dst_arr = np.ctypeslib.as_array(
-                        (ctypes.c_uint32 * (dst_w * dst_h)).from_address(dst_bits_ptr)
-                    ).reshape((dst_h, dst_w))
-                    yi = (np.arange(fit_h, dtype=np.int32) * th) // fit_h
-                    xi = (np.arange(fit_w, dtype=np.int32) * tw) // fit_w
-                    dst_arr[off_y:off_y + fit_h, off_x:off_x + fit_w] = src_arr[yi[:, None], xi[None, :]]
+                blit_fitted_bgra(
+                    hdc_dst, dst_bits_ptr, dst_w, dst_h,
+                    mapped.pData, int(mapped.RowPitch), tw, th,
+                )
                 return True
             finally:
                 _com(self.d3d_ctx, 15, None, ctypes.c_void_p, ctypes.c_uint)(self.d3d_ctx, self.staging, 0)
@@ -1575,6 +1563,191 @@ class _WGCWindowGrabber:
                 setattr(self, attr, ctypes.c_void_p())
 
 
+WINDOW_GONE_GRACE = 2.0
+CLOSED_WINDOW_CHOICE = "Escolhe uma tela"
+FALLBACK_IMAGE = "aguardando-nova-tela.jpg"
+
+
+def window_presence(is_window, is_iconic):
+    """A janela minimizada continua a mesma. Só a que deixou de existir conta como fechada."""
+    if is_window and is_iconic:
+        return "minimized"
+    if is_window:
+        return "open"
+    return "gone"
+
+
+def replacement_window(known_hwnds, windows, gone_hwnd, pid, exe):
+    """A única janela nova do mesmo programa, criada depois que a compartilhada existia."""
+    known = set()
+    for raw in list(known_hwnds or []) + [gone_hwnd]:
+        try:
+            hwnd = int(raw or 0)
+        except (TypeError, ValueError):
+            continue
+        if hwnd:
+            known.add(hwnd)
+    try:
+        pid_num = int(pid or 0)
+    except (TypeError, ValueError):
+        pid_num = 0
+    exe_name = str(exe or "").strip().lower()
+    fresh = []
+    for window in windows or []:
+        if not isinstance(window, dict):
+            continue
+        try:
+            hwnd = int(window.get("hwnd") or 0)
+            window_pid = int(window.get("pid") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not hwnd or hwnd in known:
+            continue
+        same_pid = pid_num > 0 and window_pid == pid_num
+        same_exe = bool(exe_name) and str(window.get("exe") or "").strip().lower() == exe_name
+        if same_pid or same_exe:
+            fresh.append(window)
+    if len(fresh) == 1:
+        return fresh[0]
+    return None
+
+
+WINDOW_REPLACE_STABLE = 0.5
+
+
+def process_is_running(pid):
+    """O processo da janela compartilhada ainda existe."""
+    try:
+        pid_num = int(pid or 0)
+    except (TypeError, ValueError):
+        return False
+    if pid_num <= 0:
+        return False
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel32.OpenProcess(0x1000, False, pid_num)
+    if not handle:
+        return False
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return False
+        return int(code.value) == 259
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def replacement_is_stable(candidate_hwnd, candidate_since, hwnd, now, stable_after=WINDOW_REPLACE_STABLE):
+    """A mesma janela nova precisa permanecer um instante antes de ser seguida."""
+    try:
+        current = int(hwnd or 0)
+    except (TypeError, ValueError):
+        current = 0
+    try:
+        previous = int(candidate_hwnd or 0)
+    except (TypeError, ValueError):
+        previous = 0
+    moment = float(now or 0)
+    if not current:
+        return False, 0, 0.0
+    if current != previous:
+        return False, current, moment
+    since = float(candidate_since or moment)
+    return (moment - since) >= float(stable_after), previous, since
+
+
+def window_gone_action(elapsed, replacement, process_alive, prompted=False, stable=False, grace=WINDOW_GONE_GRACE):
+    """Processo vivo espera a janela. Processo morto pede outra tela e não segue mais."""
+    if prompted:
+        return "wait"
+    if replacement and stable and process_alive:
+        return "follow"
+    if not process_alive and float(elapsed or 0) >= float(grace):
+        return "prompt"
+    return "wait"
+
+
+def cover_source_box(src_w, src_h, dst_w, dst_h):
+    """Recorte central da arte para preencher o quadro sem esticar."""
+    sw = max(1, int(src_w))
+    sh = max(1, int(src_h))
+    dw = max(1, int(dst_w))
+    dh = max(1, int(dst_h))
+    if sw * dh > sh * dw:
+        crop_h = sh
+        crop_w = max(1, min(sw, int(round(sh * dw / float(dh)))))
+    else:
+        crop_w = sw
+        crop_h = max(1, min(sh, int(round(sw * dh / float(dw)))))
+    return max(0, (sw - crop_w) // 2), max(0, (sh - crop_h) // 2), crop_w, crop_h
+
+
+def target_identity(target):
+    """Monitor pela posição. Janela pelo identificador, porque o lugar na lista se repete."""
+    if not isinstance(target, dict):
+        return ()
+    if target.get("kind") == "window":
+        try:
+            hwnd = int(target.get("hwnd") or 0)
+        except (TypeError, ValueError):
+            hwnd = 0
+        return ("window", hwnd)
+    try:
+        return (
+            "screen",
+            int(target.get("left") or 0),
+            int(target.get("top") or 0),
+            int(target.get("width") or 0),
+            int(target.get("height") or 0),
+        )
+    except (TypeError, ValueError):
+        return ("screen", 0, 0, 0, 0)
+
+
+def same_live_target(index, live_index, live_identity, monitors):
+    """O mesmo lugar na lista só conta se a janela for a mesma."""
+    if index != live_index:
+        return False
+    if not live_identity:
+        return True
+    if not isinstance(index, int) or not 0 <= index < len(monitors or []):
+        return True
+    return target_identity(monitors[index]) == tuple(live_identity)
+
+
+def load_fallback_bgra(width, height, path=""):
+    """A arte de espera no tamanho do quadro, BGRA de cima para baixo."""
+    width = max(2, int(width)) & ~1
+    height = max(2, int(height)) & ~1
+    image_path = path or existing_file(FALLBACK_IMAGE)
+    if not image_path:
+        return b""
+    image = QImage(image_path)
+    if image.isNull() or image.width() < 1 or image.height() < 1:
+        return b""
+    x, y, crop_w, crop_h = cover_source_box(image.width(), image.height(), width, height)
+    cropped = image.copy(int(x), int(y), int(crop_w), int(crop_h))
+    scaled = cropped.scaled(
+        width, height,
+        Qt.AspectRatioMode.IgnoreAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    frame = scaled.convertToFormat(QImage.Format.Format_ARGB32)
+    line = int(frame.bytesPerLine())
+    view = bytes(frame.constBits())
+    out = bytearray(width * height * 4)
+    row_bytes = width * 4
+    for row in range(height):
+        start = row * line
+        out[row * row_bytes:(row + 1) * row_bytes] = view[start:start + row_bytes]
+    out[3::4] = b"\xff" * (width * height)
+    return bytes(out)
+
+
 def fit_aspect_box(src_w, src_h, dst_w, dst_h):
     """Calcula a caixa centralizada mantendo a proporção da janela dentro do quadro final."""
     sw = max(1, int(src_w))
@@ -1587,11 +1760,195 @@ def fit_aspect_box(src_w, src_h, dst_w, dst_h):
     return (dw - fw) // 2, (dh - fh) // 2, fw, fh
 
 
+def blit_fitted_bgra(hdc_dst, dst_bits, dst_w, dst_h, src_ptr, src_pitch, src_w, src_h):
+    """Encaixa o quadro na live. No mesmo tamanho, copia. Fora dele, reduz suave, sem pixel pulando."""
+    dst_w = max(2, int(dst_w))
+    dst_h = max(2, int(dst_h))
+    src_w = max(1, int(src_w))
+    src_h = max(1, int(src_h))
+    src_pitch = max(src_w * 4, int(src_pitch))
+    if src_w == dst_w and src_h == dst_h and src_pitch == dst_w * 4:
+        ctypes.memmove(dst_bits, src_ptr, dst_w * dst_h * 4)
+        return
+    gdi32 = ctypes.windll.gdi32
+    user32 = ctypes.windll.user32
+    header = _BITMAPINFOHEADER()
+    header.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+    header.biWidth = src_w
+    header.biHeight = -src_h
+    header.biPlanes = 1
+    header.biBitCount = 32
+    bits = ctypes.c_void_p()
+    screen = user32.GetDC(None)
+    bitmap = gdi32.CreateDIBSection(screen, ctypes.byref(header), 0, ctypes.byref(bits), None, 0)
+    source = gdi32.CreateCompatibleDC(screen)
+    try:
+        if not bitmap or not bits.value or not source:
+            return
+        gdi32.SelectObject(source, bitmap)
+        row_bytes = src_w * 4
+        for row in range(src_h):
+            ctypes.memmove(bits.value + row * row_bytes, src_ptr + row * src_pitch, row_bytes)
+        ox, oy, fw, fh = fit_aspect_box(src_w, src_h, dst_w, dst_h)
+        if fw < dst_w or fh < dst_h:
+            ctypes.memset(dst_bits, 0, dst_w * dst_h * 4)
+        gdi32.SetStretchBltMode(hdc_dst, 4)
+        gdi32.SetBrushOrgEx(hdc_dst, 0, 0, None)
+        gdi32.StretchBlt(hdc_dst, ox, oy, fw, fh, source, 0, 0, src_w, src_h, 0x00CC0020)
+    finally:
+        if source:
+            gdi32.DeleteDC(source)
+        if bitmap:
+            gdi32.DeleteObject(bitmap)
+        if screen:
+            user32.ReleaseDC(None, screen)
+
+
+def frame_looks_blank(pixels, width, height, samples=12, ceiling=12):
+    """Quadro praticamente preto, amostrado num grid, sem varrer a imagem inteira."""
+    width = int(width or 0)
+    height = int(height or 0)
+    if width < 2 or height < 2 or not pixels:
+        return False
+    if len(pixels) < width * height * 4:
+        return False
+    count = max(4, int(samples))
+    for index in range(count):
+        x = (width * (index * 3 + 1)) // (count + 1)
+        y = (height * ((index * 5) % count + 1)) // (count + 1)
+        offset = (y * width + x) * 4
+        if pixels[offset] > ceiling or pixels[offset + 1] > ceiling or pixels[offset + 2] > ceiling:
+            return False
+    return True
+
+
+def frame_pointer_blank(bits, width, height, samples=12, ceiling=12):
+    width = int(width or 0)
+    height = int(height or 0)
+    address = int(bits or 0)
+    if width < 2 or height < 2 or not address:
+        return False
+    count = max(4, int(samples))
+    for index in range(count):
+        x = (width * (index * 3 + 1)) // (count + 1)
+        y = (height * ((index * 5) % count + 1)) // (count + 1)
+        pixel = (ctypes.c_ubyte * 4).from_address(address + (y * width + x) * 4)
+        if pixel[0] > ceiling or pixel[1] > ceiling or pixel[2] > ceiling:
+            return False
+    return True
+
+
+def process_is_elevated():
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def relaunch_elevated():
+    """Abre de novo pelo controle de conta do Windows. Não mexe no jogo."""
+    shell32 = ctypes.windll.shell32
+    shell32.ShellExecuteW.argtypes = [
+        wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_int,
+    ]
+    shell32.ShellExecuteW.restype = wintypes.HINSTANCE
+    if getattr(sys, "frozen", False):
+        exe = sys.executable
+        params = None
+    else:
+        exe = sys.executable
+        params = f'"{os.path.abspath(__file__)}"'
+    result = shell32.ShellExecuteW(None, "runas", exe, params, None, 1)
+    return int(result) > 32
+
+
+def program_sound_label(window):
+    title = " ".join(str(window.get("title") or "").split())
+    if len(title) > 44:
+        title = title[:41].rstrip() + "..."
+    exe = str(window.get("exe") or "").strip()
+    if exe and title:
+        return f"{title} ({exe})"
+    return exe or title or "Programa"
+
+
+def group_sound_sources(device_names, windows, query=""):
+    """Dispositivos primeiro. Depois um som por processo, com busca nos dois."""
+    needle = " ".join(str(query or "").strip().lower().split())
+    devices = [
+        {"label": "Sem som do PC", "token": "", "pid": 0},
+        {"label": WINDOW_AUDIO_LABEL, "token": WINDOW_AUDIO_TOKEN, "pid": 0},
+    ]
+    for name in device_names or []:
+        label = playback_label(name)
+        devices.append({"label": label, "token": name, "pid": 0})
+    programs = []
+    seen = set()
+    used_labels = {item["label"] for item in devices}
+    for window in windows or []:
+        if not isinstance(window, dict) or window.get("kind") != "window":
+            continue
+        try:
+            pid = int(window.get("pid") or 0)
+        except (TypeError, ValueError):
+            continue
+        exe = str(window.get("exe") or "").strip()
+        if not pid or not exe or pid in seen:
+            continue
+        seen.add(pid)
+        label = program_sound_label(window)
+        if label in used_labels:
+            label = f"{label} [{pid}]"
+        used_labels.add(label)
+        programs.append({"label": label, "token": "exe:" + exe.lower(), "pid": pid, "exe": exe})
+    if needle:
+        devices = [item for item in devices if needle in item["label"].lower() or needle in str(item["token"]).lower()]
+        programs = [
+            item for item in programs
+            if needle in item["label"].lower() or needle in item.get("exe", "").lower()
+        ]
+    return devices, programs
+
+
+def resolve_program_pid(exe, windows, remembered_pid=0, alive=None):
+    """O processo escolhido continua. Se ele morreu, entra outro do mesmo programa."""
+    exe_name = str(exe or "").strip().lower()
+
+    def is_alive(pid):
+        if not pid:
+            return False
+        if alive is None:
+            return process_is_running(pid)
+        return bool(alive(pid))
+
+    remembered = 0
+    try:
+        remembered = int(remembered_pid or 0)
+    except (TypeError, ValueError):
+        remembered = 0
+    if remembered and is_alive(remembered):
+        return remembered
+    for window in windows or []:
+        if not isinstance(window, dict):
+            continue
+        if str(window.get("exe") or "").strip().lower() != exe_name:
+            continue
+        try:
+            pid = int(window.get("pid") or 0)
+        except (TypeError, ValueError):
+            continue
+        if is_alive(pid):
+            return pid
+    return 0
+
+
 class WindowVideoFeeder:
     """Captura somente a janela/jogo escolhido sem borda amarela (Win10 e Win11) e entrega quadros BGRA contínuos."""
 
-    def __init__(self, hwnd, pipe_name, width, height, fps):
+    def __init__(self, hwnd, pipe_name, width, height, fps, pid=0, exe=""):
         self.hwnd = int(hwnd or 0)
+        self.pid = int(pid or 0)
+        self.exe = str(exe or "")
         self.pipe_name = pipe_name
         self.width = max(2, int(width) & ~1)
         self.height = max(2, int(height) & ~1)
@@ -1599,6 +1956,89 @@ class WindowVideoFeeder:
         self.pipe = None
         self.stop = False
         self.thread = None
+        self.notice = None
+        self._prompted = False
+        self._seen = {self.hwnd} if self.hwnd else set()
+        self._seen_at = 0.0
+        self._gone_at = None
+        self._lookup_at = 0.0
+        self._frozen = None
+        self._candidate_hwnd = 0
+        self._candidate_since = 0.0
+        self._waiting_note = False
+
+    def remember_open_siblings(self):
+        if self._gone_at is not None or self._prompted:
+            return
+        now = time.perf_counter()
+        if now - self._seen_at < 0.5:
+            return
+        self._seen_at = now
+        self._remember_siblings()
+
+    def take_notice(self):
+        notice = self.notice
+        self.notice = None
+        return notice
+
+    def _card_bytes(self, frame_bytes):
+        card = getattr(self, "_fallback_card_bytes", None)
+        if card is not None:
+            return card
+        try:
+            card = load_fallback_bgra(self.width, self.height)
+        except Exception:
+            card = b""
+        if len(card) != frame_bytes:
+            card = b""
+        self._fallback_card_bytes = card
+        return card
+
+    def _watch_blank(self, bits, _nbytes, now):
+        try:
+            blank = frame_pointer_blank(bits, self.width, self.height)
+        except Exception:
+            return
+        if not blank:
+            self._blank_since = None
+            self._blank_noted = False
+            return
+        if self._blank_since is None:
+            self._blank_since = now
+        if self._blank_noted or now - self._blank_since < 1.5:
+            return
+        self._blank_noted = True
+        if self.notice is None:
+            self.notice = ("black", None)
+
+    def _remember_siblings(self):
+        try:
+            windows = list_windows()
+        except Exception:
+            return
+        exe_name = self.exe.strip().lower()
+        for window in windows:
+            try:
+                hwnd = int(window.get("hwnd") or 0)
+                window_pid = int(window.get("pid") or 0)
+            except (TypeError, ValueError):
+                continue
+            if not hwnd:
+                continue
+            same_pid = self.pid > 0 and window_pid == self.pid
+            same_exe = bool(exe_name) and str(window.get("exe") or "").strip().lower() == exe_name
+            if hwnd == self.hwnd or same_pid or same_exe:
+                self._seen.add(hwnd)
+
+    def _adopt(self, window):
+        try:
+            self.hwnd = int(window.get("hwnd") or 0)
+            self.pid = int(window.get("pid") or self.pid or 0)
+        except (TypeError, ValueError):
+            return
+        self.exe = str(window.get("exe") or self.exe or "")
+        if self.hwnd:
+            self._seen.add(self.hwnd)
 
     def open_pipe(self):
         self.close()
@@ -1672,10 +2112,20 @@ class WindowVideoFeeder:
                     next_at = time.perf_counter()
 
                 grabbed = False
-                if user32.IsWindow(self.hwnd) and not user32.IsIconic(self.hwnd):
+                alive = bool(user32.IsWindow(self.hwnd))
+                iconic = bool(alive and user32.IsIconic(self.hwnd))
+                presence = window_presence(alive, iconic)
+                if presence == "open":
+                    self._gone_at = None
+                    self._frozen = None
+                    self._candidate_hwnd = 0
+                    self._candidate_since = 0.0
+                    self._waiting_note = False
                     if use_wgc:
                         grabbed = wgc.grab_into_hdc(dst_dc, self.width, self.height, ctypes.byref(bmi), dst_bits.value)
-                    if not grabbed:
+                        if grabbed:
+                            self._wgc_seen = True
+                    if not grabbed and not use_wgc:
                         crect = RECT()
                         user32.GetClientRect(self.hwnd, ctypes.byref(crect))
                         cw = int(crect.right - crect.left)
@@ -1707,8 +2157,68 @@ class WindowVideoFeeder:
                                 ox, oy, fw, fh = fit_aspect_box(cw, ch, self.width, self.height)
                                 if fw < self.width or fh < self.height:
                                     ctypes.memset(dst_bits.value, 0, frame_bytes)
+                                gdi32.SetStretchBltMode(dst_dc, 4)
+                                gdi32.SetBrushOrgEx(dst_dc, 0, 0, None)
                                 gdi32.StretchBlt(dst_dc, ox, oy, fw, fh, src_dc, 0, 0, cw, ch, 0x00CC0020)
                                 grabbed = True
+                    if dst_bits.value and (grabbed or getattr(self, "_wgc_seen", False)):
+                        self._watch_blank(dst_bits.value, frame_bytes, now)
+                elif presence == "minimized":
+                    self._gone_at = None
+                else:
+                    if self._gone_at is None:
+                        self._gone_at = now
+                        if dst_bits.value and self._frozen is None:
+                            self._frozen = ctypes.string_at(dst_bits.value, frame_bytes)
+                    if now - self._lookup_at >= 0.1:
+                        self._lookup_at = now
+                        try:
+                            found = replacement_window(
+                                self._seen, list_windows(), self.hwnd, self.pid, self.exe,
+                            )
+                        except Exception:
+                            found = None
+                        try:
+                            alive_proc = process_is_running(self.pid)
+                        except Exception:
+                            alive_proc = False
+                        found_hwnd = 0
+                        if isinstance(found, dict):
+                            try:
+                                found_hwnd = int(found.get("hwnd") or 0)
+                            except (TypeError, ValueError):
+                                found_hwnd = 0
+                        stable, self._candidate_hwnd, self._candidate_since = replacement_is_stable(
+                            self._candidate_hwnd, self._candidate_since, found_hwnd, now,
+                        )
+                        action = window_gone_action(
+                            now - self._gone_at, found, alive_proc, self._prompted, stable,
+                        )
+                        if action == "follow" and found:
+                            self._adopt(found)
+                            wgc.close()
+                            wgc = _WGCWindowGrabber(self.hwnd)
+                            use_wgc = wgc.open()
+                            src_size = (0, 0)
+                            self._gone_at = None
+                            self._frozen = None
+                            self._candidate_hwnd = 0
+                            self._candidate_since = 0.0
+                            self._waiting_note = False
+                            self.notice = ("follow", dict(found))
+                        elif action == "prompt" and not self._prompted:
+                            self._prompted = True
+                            self._waiting_note = False
+                            self.notice = ("prompt", None)
+                        elif action == "wait" and alive_proc and not self._waiting_note and self.notice is None:
+                            self._waiting_note = True
+                            self.notice = ("waiting", None)
+                    if dst_bits.value:
+                        card = self._card_bytes(frame_bytes)
+                        if card:
+                            ctypes.memmove(dst_bits.value, card, frame_bytes)
+                        elif self._frozen:
+                            ctypes.memmove(dst_bits.value, self._frozen, frame_bytes)
 
                 if not _k32.WriteFile(handle, dst_bits, frame_bytes, ctypes.byref(wrote), None):
                     break
@@ -2648,6 +3158,10 @@ class _TargetPickerPopup(QFrame):
         root.addWidget(self.scroll, 1)
 
         self.rebuild_cards(refresh_thumbs=True)
+        self._targets_sig = self._target_signature(self.targets_provider() if callable(self.targets_provider) else [])
+
+    def _target_signature(self, targets):
+        return tuple(target_identity(target) for target in (targets or []))
 
     def _on_manual_refresh(self):
         if callable(self.refresh_fn):
@@ -2656,6 +3170,20 @@ class _TargetPickerPopup(QFrame):
             except Exception:
                 pass
         self.rebuild_cards(refresh_thumbs=True)
+        self._targets_sig = self._target_signature(self.targets_provider() if callable(self.targets_provider) else [])
+
+    def _on_auto_refresh(self):
+        if callable(self.refresh_fn):
+            try:
+                self.refresh_fn()
+            except Exception:
+                pass
+        targets = self.targets_provider() if callable(self.targets_provider) else []
+        signature = self._target_signature(targets)
+        if signature == getattr(self, "_targets_sig", None):
+            return
+        self._targets_sig = signature
+        self.rebuild_cards(refresh_thumbs=False)
 
     def _cache_key(self, target):
         if isinstance(target, dict) and target.get("kind") == "window":
@@ -2742,6 +3270,114 @@ class _TargetPickerPopup(QFrame):
 
     def showEvent(self, event):
         super().showEvent(event)
+        timer = getattr(self, "_refresh_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setInterval(1000)
+            timer.timeout.connect(self._on_auto_refresh)
+            self._refresh_timer = timer
+        if not timer.isActive():
+            timer.start()
+        try:
+            self.search_input.setFocus(Qt.FocusReason.PopupFocusReason)
+        except Exception:
+            pass
+
+    def hideEvent(self, event):
+        timer = getattr(self, "_refresh_timer", None)
+        if timer is not None:
+            timer.stop()
+        super().hideEvent(event)
+        if self.owner.popup is self:
+            self.owner.popup = None
+
+
+class _SoundPickerPopup(QFrame):
+    """Dispositivos e sons de programas, com busca. Sem miniatura, para não pedir redesenho da janela."""
+
+    def __init__(self, owner, provider, refresh_fn, bg, field, fg, muted, accent, line):
+        super().__init__(None, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint)
+        self.owner = owner
+        self.provider = provider
+        self.refresh_fn = refresh_fn
+        self.bg = bg
+        self.field = field
+        self.fg = fg
+        self.muted = muted
+        self.accent = accent
+        self.line = line
+        self.setFixedSize(420, 440)
+        self.setStyleSheet(f"_SoundPickerPopup {{ background-color: {bg}; border: 1px solid {line}; border-radius: 12px; }}")
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 10, 12, 10)
+        root.setSpacing(8)
+        self.search_input = QLineEdit(self)
+        self.search_input.setPlaceholderText("Buscar dispositivo ou programa...")
+        self.search_input.setFont(QFont("Segoe UI", 10))
+        self.search_input.setFixedHeight(32)
+        self.search_input.setStyleSheet(
+            f"QLineEdit {{ background-color: {field}; color: {fg}; border: 1px solid {line}; border-radius: 8px; padding: 2px 10px; }}"
+            f"QLineEdit:focus {{ border: 1px solid {accent}; }}"
+        )
+        self.search_input.textChanged.connect(lambda _text: self.rebuild())
+        root.addWidget(self.search_input)
+        self.scroll = QScrollArea(self)
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setStyleSheet(f"QScrollArea {{ background: {bg}; border: none; }}")
+        self.inner = QWidget()
+        self.inner.setStyleSheet(f"background-color: {bg}; border: none;")
+        self.inner_layout = QVBoxLayout(self.inner)
+        self.inner_layout.setContentsMargins(2, 2, 2, 6)
+        self.inner_layout.setSpacing(4)
+        self.scroll.setWidget(self.inner)
+        root.addWidget(self.scroll, 1)
+        self.rebuild()
+
+    def rebuild(self):
+        while self.inner_layout.count():
+            item = self.inner_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        grouped = self.provider(self.search_input.text()) if callable(self.provider) else {"devices": [], "programs": []}
+        current = self.owner.variable.get()
+        self._add_section("Dispositivos", grouped.get("devices") or [], current)
+        self._add_section("Janelas e programas", grouped.get("programs") or [], current)
+        if not grouped.get("devices") and not grouped.get("programs"):
+            empty = QLabel("Nenhum dispositivo ou programa para essa busca.", self.inner)
+            empty.setStyleSheet(f"color: {self.muted}; background: transparent; border: none; padding: 16px;")
+            self.inner_layout.addWidget(empty)
+        self.inner_layout.addStretch(1)
+
+    def _add_section(self, heading, rows, current):
+        if not rows:
+            return
+        title = QLabel(heading, self.inner)
+        title.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        title.setStyleSheet(f"color: {self.muted}; background: transparent; border: none;")
+        self.inner_layout.addWidget(title)
+        for row in rows:
+            label = row["label"]
+            button = QPushButton(label, self.inner)
+            selected = label == current
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setStyleSheet(
+                f"QPushButton {{ text-align: left; padding: 8px 10px; border-radius: 8px; border: 1px solid {self.accent if selected else self.line};"
+                f"background: {self.field}; color: {self.fg}; }}"
+                f"QPushButton:hover {{ border: 1px solid {self.accent}; }}"
+            )
+            button.clicked.connect(lambda _checked=False, label=label: self.owner.pick(label))
+            self.inner_layout.addWidget(button)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if callable(self.refresh_fn):
+            try:
+                self.refresh_fn()
+            except Exception:
+                pass
+            self.rebuild()
         try:
             self.search_input.setFocus(Qt.FocusReason.PopupFocusReason)
         except Exception:
@@ -2756,7 +3392,7 @@ class _TargetPickerPopup(QFrame):
 class Choice(QWidget):
     """Lista escura com canto arredondado e anti-aliasing nativo Qt."""
 
-    def __init__(self, master, variable, labels, bg, field, fg, accent, before_open=None, targets_provider=None, refresh_cmd=None):
+    def __init__(self, master, variable, labels, bg, field, fg, accent, before_open=None, targets_provider=None, refresh_cmd=None, sound_provider=None):
         _ensure_qt_app()
         super().__init__(master if isinstance(master, QWidget) else None)
         self.variable = variable
@@ -2769,6 +3405,7 @@ class Choice(QWidget):
         self.before_open = before_open
         self.targets_provider = targets_provider
         self.refresh_cmd = refresh_cmd
+        self.sound_provider = sound_provider
         self.popup = None
         self.canvas = self
         self.setFixedHeight(44)
@@ -2873,6 +3510,23 @@ class Choice(QWidget):
                     above = self.mapToGlobal(QPoint(0, -popup.height() - 4)).y()
                     py = above if above >= avail.top() + 8 else max(avail.top() + 8, avail.bottom() - popup.height() - 8)
                 global_pos = QPoint(px, py)
+            popup.move(global_pos)
+            self.popup = popup
+            popup.show()
+            return
+        if callable(self.sound_provider):
+            popup = _SoundPickerPopup(
+                self,
+                self.sound_provider,
+                self.before_open,
+                self.bg,
+                self.field,
+                self.fg,
+                "#9a9a9a",
+                self.accent,
+                self.line,
+            )
+            global_pos = self.mapToGlobal(QPoint(0, self.height() + 4))
             popup.move(global_pos)
             self.popup = popup
             popup.show()
@@ -4230,13 +4884,33 @@ class App(QWidget):
         self.pc_volume = _QtVar(clamp_gain(self.settings.get("pc_volume", 100)))
         self.mic_volume = _QtVar(clamp_gain(self.settings.get("mic_volume", 100)))
         self._mic_muted = False
-        self.pc_meter = self._choice("Som do PC", self.pc_choice, pc_labels, self.pc_volume, self._gain_changed)
+        self._program_pid_by_label = {}
+        self._sound_devices = []
+        self._sound_programs = []
+        self.pc_meter = self._choice(
+            "Som do PC",
+            self.pc_choice,
+            pc_labels,
+            self.pc_volume,
+            self._gain_changed,
+            before_open=self.refresh_sound_sources,
+            sound_provider=self.sound_catalog,
+        )
         self.mic_meter = self._choice("Microfone", self.mic_choice, ["Sem microfone", *self.mic_devices], self.mic_volume, self._gain_changed)
         self.audio_live = None
         self.live_nick = ""
         self.live_host = ""
         self.pc_choice.trace_add("write", lambda *_args: self._audio_changed())
         self.mic_choice.trace_add("write", lambda *_args: self._audio_changed())
+        self.refresh_sound_sources()
+        if isinstance(saved_pc, str) and saved_pc.startswith("exe:"):
+            for label, token in self.pc_by_label.items():
+                if token == saved_pc:
+                    self.pc_choice._value = label
+                    widget = getattr(self, "pc_choice_widget", None)
+                    if widget is not None:
+                        widget.redraw()
+                    break
 
         quality_box = QWidget(self.content)
         q_vbox = QVBoxLayout(quality_box)
@@ -4376,7 +5050,7 @@ class App(QWidget):
         vbox.addWidget(entry)
         self._content_layout.addWidget(box)
 
-    def _choice(self, label, variable, labels, volume_var=None, volume_cmd=None, before_open=None, refresh_cmd=None, targets_provider=None):
+    def _choice(self, label, variable, labels, volume_var=None, volume_cmd=None, before_open=None, refresh_cmd=None, targets_provider=None, sound_provider=None):
         box = QWidget(self.content)
         vbox = QVBoxLayout(box)
         vbox.setContentsMargins(0, 0, 0, 0)
@@ -4409,12 +5083,43 @@ class App(QWidget):
             before_open=before_open,
             targets_provider=targets_provider,
             refresh_cmd=refresh_cmd,
+            sound_provider=sound_provider,
         )
         if refresh_cmd is not None:
             self.monitor_choice_widget = ch
+        if sound_provider is not None:
+            self.pc_choice_widget = ch
         vbox.addWidget(ch)
         self._content_layout.addWidget(box)
         return pill
+
+    def refresh_sound_sources(self):
+        try:
+            self.windows = list_windows()
+        except Exception:
+            self.windows = getattr(self, "windows", []) or []
+        devices, programs = group_sound_sources(getattr(self, "pc_devices", []), self.windows)
+        self._sound_devices = devices
+        self._sound_programs = programs
+        book = getattr(self, "_program_pid_by_label", None)
+        if not isinstance(book, dict):
+            book = {}
+            self._program_pid_by_label = book
+        for row in programs:
+            self.pc_by_label[row["label"]] = row["token"]
+            book[row["label"]] = row["pid"]
+        labels = [row["label"] for row in devices] + [row["label"] for row in programs]
+        widget = getattr(self, "pc_choice_widget", None)
+        if widget is not None and labels:
+            widget.set_labels(labels)
+
+    def sound_catalog(self, query=""):
+        devices, programs = group_sound_sources(
+            getattr(self, "pc_devices", []),
+            getattr(self, "windows", []),
+            query,
+        )
+        return {"devices": devices, "programs": programs}
 
     def refresh_targets(self):
         current_label = self.monitor_choice.get() if hasattr(self, "monitor_choice") else ""
@@ -4437,10 +5142,28 @@ class App(QWidget):
                     if widget is not None:
                         widget.redraw()
                     return
+        if getattr(self, "_closed_window_hold", False) or (
+            self.running and isinstance(current_item, dict) and current_item.get("kind") == "window"
+        ):
+            self._clear_closed_choice()
+            return
         if self.monitor_labels:
             self.monitor_choice._value = self.monitor_labels[0]
             if widget is not None:
                 widget.redraw()
+
+    def _clear_closed_choice(self):
+        if not hasattr(self, "monitor_choice"):
+            return
+        if self.monitor_choice.get() == CLOSED_WINDOW_CHOICE:
+            widget = getattr(self, "monitor_choice_widget", None)
+            if widget is not None:
+                widget.redraw()
+            return
+        self.monitor_choice._value = CLOSED_WINDOW_CHOICE
+        widget = getattr(self, "monitor_choice_widget", None)
+        if widget is not None:
+            widget.redraw()
 
     def _paint_quality(self):
         current = self.quality.get()
@@ -4457,6 +5180,8 @@ class App(QWidget):
         try:
             return self.monitor_labels.index(self.monitor_choice.get())
         except ValueError:
+            if getattr(self, "_closed_window_hold", False):
+                return -1
             return 0
 
     def selected_pc_audio(self):
@@ -4464,6 +5189,18 @@ class App(QWidget):
 
     def effective_pc_audio(self, monitor_idx=None):
         raw = self.selected_pc_audio()
+        if isinstance(raw, str) and raw.startswith("exe:"):
+            label = self.pc_choice.get() if hasattr(self, "pc_choice") else ""
+            remembered = 0
+            try:
+                remembered = int(getattr(self, "_program_pid_by_label", {}).get(label) or 0)
+            except (TypeError, ValueError):
+                remembered = 0
+            pid = resolve_program_pid(raw[4:], getattr(self, "windows", []), remembered)
+            book = getattr(self, "_program_pid_by_label", None)
+            if pid and isinstance(book, dict):
+                book[label] = pid
+            return f"pid:{pid}" if pid else ""
         if raw != WINDOW_AUDIO_TOKEN:
             return raw
         idx = self.selected_monitor() if monitor_idx is None else int(monitor_idx)
@@ -4652,24 +5389,27 @@ class App(QWidget):
         log_event(f"inicio apelido={nick} {width}x{height} fps={fps} pc={pc_audio or '-'} mic={mic or '-'}")
         notify_publisher(host, nick, self.publish.get("user", ""), self.publish.get("password", ""), "claim")
         live_audio = None
-        if pc_audio or mic:
-            self.after(0, lambda: self.set_status("Abrindo o som do PC..."))
-            live_audio = LiveAudio(
-                pc_audio,
-                mic,
-                pc_gain=clamp_gain(self.pc_volume.get()) / 100.0 if hasattr(self, "pc_volume") else 1.0,
-                mic_gain=clamp_gain(self.mic_volume.get()) / 100.0 if hasattr(self, "mic_volume") else 1.0,
-            )
-            live_audio.set_gains(mic_muted=getattr(self, "_mic_muted", False))
-            try:
-                run_with_timeout(live_audio.start, 5)
-                self.audio_live = live_audio
-            except TimeoutError:
-                live_audio.close()
+        self.after(0, lambda: self.set_status("Abrindo o som..."))
+        live_audio = LiveAudio(
+            pc_audio,
+            mic,
+            pc_gain=clamp_gain(self.pc_volume.get()) / 100.0 if hasattr(self, "pc_volume") else 1.0,
+            mic_gain=clamp_gain(self.mic_volume.get()) / 100.0 if hasattr(self, "mic_volume") else 1.0,
+        )
+        live_audio.set_gains(mic_muted=getattr(self, "_mic_muted", False))
+        try:
+            run_with_timeout(live_audio.start, 5)
+            self.audio_live = live_audio
+        except TimeoutError:
+            live_audio.close()
+            live_audio = None
+            if pc_audio or mic:
                 self.after(0, lambda: self._fail("O som do PC não abriu. Escolhe outro dispositivo, ou Sem som do PC."))
                 return
-            except Exception as error:
-                live_audio.close()
+        except Exception as error:
+            live_audio.close()
+            live_audio = None
+            if pc_audio or mic:
                 self.after(0, lambda message=str(error): self._fail(message))
                 return
         if pc_audio and mic:
@@ -4688,8 +5428,9 @@ class App(QWidget):
                 output_idx = self._consume_switch(output_idx)
                 if output_idx >= len(self.monitors):
                     output_idx = 0
-                self._live_monitor = output_idx
                 monitor = self.monitors[output_idx]
+                self._live_monitor = output_idx
+                self._live_target = target_identity(monitor)
                 if live_audio is not None:
                     desired_pc = self.effective_pc_audio(output_idx)
                     desired_mic = self.selected_mic()
@@ -4790,6 +5531,11 @@ class App(QWidget):
         threading.Thread(target=self._announce_switch, args=(ticket, "quality"), daemon=True).start()
 
     def _screen_changed(self):
+        if getattr(self, "_closed_window_hold", False):
+            label = self.monitor_choice.get() if hasattr(self, "monitor_choice") else ""
+            if label not in getattr(self, "monitor_labels", []):
+                return
+            self._closed_window_hold = False
         job = getattr(self, "_screen_debounce_job", None)
         if job:
             try:
@@ -4798,27 +5544,13 @@ class App(QWidget):
                 pass
             self._screen_debounce_job = None
         index = self.selected_monitor()
-        if 0 <= index < len(self.monitors) and hasattr(self, "pc_choice"):
-            mon = self.monitors[index]
-            cur_pc = self.pc_choice.get()
-            if mon.get("kind") == "window":
-                if cur_pc not in ("Sem som do PC", WINDOW_AUDIO_LABEL):
-                    self._last_speaker_label = cur_pc
-                if cur_pc != "Sem som do PC" and cur_pc != WINDOW_AUDIO_LABEL:
-                    self.pc_choice.set(WINDOW_AUDIO_LABEL)
-            else:
-                if cur_pc == WINDOW_AUDIO_LABEL:
-                    restore = getattr(self, "_last_speaker_label", "Sem som do PC")
-                    if restore not in self.pc_by_label and restore != "Sem som do PC":
-                        restore = "Sem som do PC"
-                    self.pc_choice.set(restore)
         try:
             self.save_settings()
         except Exception:
             pass
         if not self.running or self.stopping:
             return
-        if index == getattr(self, "_live_monitor", None) and self._switch_to is None:
+        if self._selection_matches_live(index) and self._switch_to is None:
             return
         if not 0 <= index < len(self.monitors):
             return
@@ -4832,7 +5564,7 @@ class App(QWidget):
         if not self.running or self.stopping:
             return
         index = self.selected_monitor()
-        if index == getattr(self, "_live_monitor", None):
+        if self._selection_matches_live(index):
             self._switch_to = None
             return
         if not 0 <= index < len(self.monitors):
@@ -4854,6 +5586,145 @@ class App(QWidget):
             if ticket == self._switch_ticket:
                 self._switch_ready = True
 
+    def _poll_window_feeder(self):
+        feeder = getattr(self, "_window_feeder", None)
+        if feeder is None:
+            return
+        feeder.remember_open_siblings()
+        notice = feeder.take_notice()
+        if not notice:
+            return
+        kind, payload = notice
+        if kind == "follow" and isinstance(payload, dict):
+            window = dict(payload)
+            self.after(0, lambda window=window: self._note_window_followed(window))
+        elif kind == "prompt":
+            self.after(0, self._prompt_closed_window)
+        elif kind == "waiting":
+            self.after(0, self._note_window_waiting)
+        elif kind == "black":
+            self.after(0, self._note_window_black)
+
+    def _selection_matches_live(self, index):
+        return same_live_target(
+            index,
+            getattr(self, "_live_monitor", None),
+            getattr(self, "_live_target", None),
+            getattr(self, "monitors", []),
+        )
+
+    def _note_window_followed(self, window):
+        try:
+            hwnd = int(window.get("hwnd") or 0)
+        except (TypeError, ValueError):
+            hwnd = 0
+        idx = None
+        for pos, item in enumerate(self.monitors):
+            if item.get("kind") == "window" and int(item.get("hwnd") or 0) == hwnd and hwnd:
+                idx = pos
+                break
+        if idx is None:
+            live = getattr(self, "_live_monitor", None)
+            slot = self.monitors[live] if isinstance(live, int) and 0 <= live < len(self.monitors) else None
+            slot_hwnd = int(slot.get("hwnd") or 0) if isinstance(slot, dict) else 0
+            remembered = getattr(self, "_live_target", None)
+            same_slot = (
+                isinstance(slot, dict)
+                and slot.get("kind") == "window"
+                and (not remembered or remembered == ("window", slot_hwnd))
+            )
+            if same_slot:
+                idx = live
+            else:
+                self.monitors.append(dict(window, kind="window"))
+                idx = len(self.monitors) - 1
+        current = self.monitors[idx] if 0 <= idx < len(self.monitors) else {}
+        self._closed_window_hold = False
+        merged = dict(current)
+        merged.update(window)
+        merged["kind"] = "window"
+        self.monitors[idx] = merged
+        self._live_monitor = idx
+        self._live_target = target_identity(merged)
+        label = monitor_label(idx, merged)
+        if idx == len(self.monitor_labels):
+            self.monitor_labels.append(label)
+        elif 0 <= idx < len(self.monitor_labels):
+            self.monitor_labels[idx] = label
+        self.monitor_choice._value = label
+        widget = getattr(self, "monitor_choice_widget", None)
+        if widget is not None:
+            widget.set_labels(self.monitor_labels)
+            widget.redraw()
+        old_pid = int(current.get("pid") or 0)
+        new_pid = int(merged.get("pid") or 0)
+        audio = getattr(self, "audio_live", None)
+        if audio is not None and new_pid and new_pid != old_pid and self.selected_pc_audio() == WINDOW_AUDIO_TOKEN:
+            try:
+                audio.retarget(f"pid:{new_pid}", self.selected_mic())
+            except Exception as error:
+                log_event(f"falha retarget som {error}")
+        log_event(f"janela do mesmo programa hwnd={merged.get('hwnd')}")
+        if self._base_status and not getattr(self, "_closed_window_hold", False):
+            self._refresh_live_status()
+
+    def _note_window_waiting(self):
+        if self.stopping or not self.running or getattr(self, "_closed_window_hold", False):
+            return
+        self.set_status("O jogo está trocando de tela...")
+        try:
+            self.refresh_targets()
+        except Exception:
+            pass
+
+    def _prompt_closed_window(self):
+        if self.stopping or not self.running or getattr(self, "_closed_window_hold", False):
+            return
+        self._closed_window_hold = True
+        try:
+            self.refresh_targets()
+        except Exception:
+            pass
+        self._clear_closed_choice()
+        self.set_status("A janela fechou. Escolhe outra tela.")
+        log_event("janela compartilhada fechou")
+        try:
+            if getattr(self, "_in_tray", False):
+                self._restore_from_tray()
+            else:
+                self.showNormal()
+                self.raise_()
+                self.activateWindow()
+        except Exception:
+            pass
+        widget = getattr(self, "monitor_choice_widget", None)
+        if widget is not None:
+            try:
+                widget.open_menu()
+            except Exception:
+                pass
+
+    def _note_window_black(self):
+        if self.stopping or not self.running or getattr(self, "_black_dialog", False):
+            return
+        self._black_dialog = True
+        if process_is_elevated():
+            self.set_status("A imagem está preta. Deixa o jogo em janela ou sem borda, com o jogo em foco.")
+            return
+        self.set_status("A imagem está preta. Esse jogo pede o Spartan Live como administrador.")
+        answer = QMessageBox.question(
+            self,
+            "Spartan Live",
+            "Abrir o Spartan Live como administrador?\nA live atual para, e você transmite de novo.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        if relaunch_elevated():
+            self.stop()
+            self.close()
+
     def _wait_proc(self, proc, timeout=None):
         deadline = None if timeout is None else time.perf_counter() + timeout
         while proc.poll() is None:
@@ -4864,6 +5735,9 @@ class App(QWidget):
                 getattr(self, "_frame_at", time.perf_counter()),
                 time.perf_counter(),
             )
+            poll_window = getattr(self, "_poll_window_feeder", None)
+            if callable(poll_window):
+                poll_window()
             has_switch = self._switch_to is not None or getattr(self, "_switch_quality", None) is not None
             if self.stopping or video_exited or stalled or (has_switch and self._switch_ready):
                 if (stalled or video_exited) and not self.stopping:
@@ -4981,7 +5855,9 @@ class App(QWidget):
         if mode == "window":
             vpipe = rf"\\.\pipe\spartan-vid-{os.getpid()}-{self._av_ticket}"
             mon["video_pipe"] = vpipe
-            feeder = WindowVideoFeeder(mon.get("hwnd", 0), vpipe, width, height, fps)
+            feeder = WindowVideoFeeder(
+                mon.get("hwnd", 0), vpipe, width, height, fps, mon.get("pid", 0), mon.get("exe", ""),
+            )
             try:
                 feeder.open_pipe()
             except OSError as error:
@@ -5338,6 +6214,7 @@ class App(QWidget):
     def stop(self):
         self._switch_to = None
         self._switch_quality = None
+        self._closed_window_hold = False
         self._base_status = ""
         self._slow_net = False
         self._slow_streak = 0

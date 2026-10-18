@@ -833,12 +833,14 @@ class PublisherTests(unittest.TestCase):
             ]
             app.monitor_labels = [monitor_label(i, m) for i, m in enumerate(app.monitors)]
             app.monitor_choice_widget.set_labels(app.monitor_labels)
-            app.pc_choice.set(next((lbl for lbl in app.pc_by_label if lbl != WINDOW_AUDIO_LABEL), "Sem som do PC"))
+            app.pc_choice.set(next((lbl for lbl in app.pc_by_label if lbl != WINDOW_AUDIO_LABEL and not str(app.pc_by_label[lbl]).startswith("exe:")), "Sem som do PC"))
+            kept = app.pc_choice.get()
             app.monitor_choice.set(app.monitor_labels[1])
-            self.assertEqual(app.pc_choice.get(), WINDOW_AUDIO_LABEL)
+            self.assertEqual(app.pc_choice.get(), kept)
+            app.pc_choice.set(WINDOW_AUDIO_LABEL)
             self.assertEqual(app.effective_pc_audio(), f"pid:{os.getpid()}")
             app.monitor_choice.set(app.monitor_labels[0])
-            self.assertNotEqual(app.pc_choice.get(), WINDOW_AUDIO_LABEL)
+            self.assertEqual(app.pc_choice.get(), WINDOW_AUDIO_LABEL)
 
             if found_wins:
                 grabber = _WGCWindowGrabber(found_wins[0]["hwnd"])
@@ -887,8 +889,82 @@ class PublisherTests(unittest.TestCase):
             popup.cards[0].on_pick(popup.cards[0].entry["label"])
             self.assertEqual(app.monitor_choice.get(), app.monitor_labels[1])
             self.assertIsNone(app.monitor_choice_widget.popup)
+
+            from spartan_live import (
+                process_is_running, replacement_is_stable, replacement_window,
+                window_gone_action, window_presence,
+            )
+            old = {"kind": "window", "hwnd": 10, "pid": 50, "exe": "game.exe", "title": "Menu"}
+            sibling = {"kind": "window", "hwnd": 11, "pid": 50, "exe": "game.exe", "title": "Chat"}
+            born = {"kind": "window", "hwnd": 12, "pid": 50, "exe": "game.exe", "title": "Game"}
+            other = {"kind": "window", "hwnd": 13, "pid": 80, "exe": "chrome.exe", "title": "Web"}
+            self.assertEqual(window_presence(True, False), "open")
+            self.assertEqual(window_presence(True, True), "minimized")
+            self.assertEqual(window_presence(False, False), "gone")
+            self.assertIsNone(replacement_window([10, 11], [sibling, other], 10, 50, "game.exe"))
+            followed = replacement_window([10, 11], [sibling, born], 10, 50, "game.exe")
+            self.assertEqual(followed["hwnd"], 12)
+            self.assertIsNone(replacement_window([10], [born, dict(born, hwnd=14, title="Outra")], 10, 50, "game.exe"))
+            self.assertEqual(window_gone_action(0.4, None, True), "wait")
+            self.assertEqual(window_gone_action(30.0, None, True), "wait")
+            self.assertEqual(window_gone_action(2.0, None, False), "prompt")
+            self.assertEqual(window_gone_action(0.2, born, True, stable=False), "wait")
+            self.assertEqual(window_gone_action(30.0, born, True, stable=True), "follow")
+            self.assertEqual(window_gone_action(30.0, born, True, prompted=True, stable=True), "wait")
+            self.assertEqual(window_gone_action(3.0, born, False, stable=True), "prompt")
+            stable, hwnd, since = replacement_is_stable(0, 0.0, 12, 10.0)
+            self.assertEqual((stable, hwnd), (False, 12))
+            stable, hwnd, since = replacement_is_stable(hwnd, since, 12, 10.6)
+            self.assertTrue(stable)
+            self.assertTrue(process_is_running(os.getpid()))
+            self.assertFalse(process_is_running(0))
         finally:
             app.destroy()
+
+    def test_cartao_de_espera_e_clique_na_janela_nova_do_mesmo_lugar(self):
+        from spartan_live import cover_source_box, load_fallback_bgra, same_live_target, target_identity
+        self.assertEqual(cover_source_box(1920, 1080, 1280, 720), (0, 0, 1920, 1080))
+        self.assertEqual(cover_source_box(2000, 1000, 1000, 1000), (500, 0, 1000, 1000))
+        screen = {"left": 0, "top": 0, "width": 1920, "height": 1080}
+        old = {"kind": "window", "hwnd": 10}
+        born = {"kind": "window", "hwnd": 12}
+        monitors = [screen, born]
+        self.assertTrue(same_live_target(1, 1, target_identity(old), [screen, old]))
+        self.assertFalse(same_live_target(1, 1, target_identity(old), monitors))
+        self.assertFalse(same_live_target(0, 1, target_identity(old), monitors))
+        frame = load_fallback_bgra(320, 180)
+        self.assertEqual(len(frame), 320 * 180 * 4)
+        self.assertEqual(frame[3], 255)
+
+    def test_som_de_programa_e_quadro_preto(self):
+        from spartan_live import (
+            chosen_pc_audio, frame_looks_blank, group_sound_sources, process_is_elevated, resolve_program_pid,
+        )
+        black = bytes(32 * 18 * 4)
+        self.assertTrue(frame_looks_blank(black, 32, 18))
+        bright = bytearray(black)
+        x = (32 * 1) // 13
+        y = (18 * 1) // 13
+        bright[(y * 32 + x) * 4] = 200
+        self.assertFalse(frame_looks_blank(bytes(bright), 32, 18))
+        windows = [
+            {"kind": "window", "pid": 10, "exe": "firefox.exe", "title": "Mozilla Firefox"},
+            {"kind": "window", "pid": 10, "exe": "firefox.exe", "title": "Outra aba"},
+            {"kind": "window", "pid": 11, "exe": "msedge.exe", "title": "Edge"},
+        ]
+        devices, programs = group_sound_sources(["Speakers [Loopback]"], windows, "")
+        self.assertEqual(devices[0]["label"], "Sem som do PC")
+        self.assertEqual(devices[2]["label"], "Speakers")
+        self.assertEqual(len(programs), 2)
+        _devices, programs = group_sound_sources(["Speakers [Loopback]"], windows, "firefox")
+        self.assertEqual(len(programs), 1)
+        self.assertEqual(programs[0]["token"], "exe:firefox.exe")
+        alive = lambda pid: pid == 10
+        self.assertEqual(resolve_program_pid("firefox.exe", windows, 10, alive), 10)
+        self.assertEqual(resolve_program_pid("firefox.exe", windows, 99, alive), 10)
+        self.assertEqual(resolve_program_pid("firefox.exe", windows, 99, lambda pid: False), 0)
+        self.assertEqual(chosen_pc_audio("exe:firefox.exe", ["Speakers"], "Speakers"), "exe:firefox.exe")
+        self.assertIsInstance(process_is_elevated(), bool)
 
 
 if __name__ == "__main__":
