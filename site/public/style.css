@@ -239,6 +239,67 @@ body[data-guest="1"] #download-note,
   font-size: 22px;
 }
 
+#guest-revoke-ask {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+#guest-revoke-ask.hidden { display: none; }
+
+.guest-revoke-card {
+  width: min(420px, 100%);
+  padding: 22px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  box-shadow: var(--shadow);
+}
+
+.guest-revoke-card h2 {
+  margin: 0 0 8px;
+  font-size: 22px;
+}
+
+.guest-revoke-card p {
+  margin: 0;
+  color: var(--text);
+  font-size: 16px;
+  line-height: 1.45;
+}
+
+.guest-revoke-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+#guest-revoke-cancel,
+#guest-revoke-confirm {
+  height: 36px;
+  padding: 0 14px;
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+#guest-revoke-cancel {
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--line);
+}
+
+#guest-revoke-confirm {
+  color: #f6f1f1;
+  background: var(--accent);
+  border: 1px solid var(--accent-2);
+  font-weight: 650;
+}
+
 #settings,
 #grid-fullscreen,
 #theater-toggle {
@@ -1068,12 +1129,12 @@ body.tab-hidden .live-led .led {
   position: fixed;
   top: 14px;
   left: 14px;
-  z-index: 60;
+  z-index: 70;
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  max-width: min(360px, calc(100vw - 28px));
-  padding: 9px 14px;
+  gap: 4px;
+  max-width: min(420px, calc(100vw - 28px));
+  padding: 6px 6px 6px 14px;
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 999px;
   background: rgba(18, 18, 18, 0.92);
@@ -1082,8 +1143,37 @@ body.tab-hidden .live-led .led {
   font-weight: 600;
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
   backdrop-filter: blur(8px);
+  pointer-events: auto;
+}
+
+.arrival-toast-open,
+.arrival-toast-close {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
   cursor: pointer;
-  transition: opacity 0.18s ease, transform 0.18s ease, border-color 0.15s ease;
+}
+
+.arrival-toast-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 3px 4px;
+  text-align: left;
+}
+
+.arrival-toast-close {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+}
+
+.arrival-toast-close:hover,
+.arrival-toast-open:hover {
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .arrival-toast:hover {

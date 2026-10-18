@@ -27,3 +27,9 @@ export function guestRemainLabel(exp, now = Date.now()) {
   if (minutes > 0) return `${minutes}min ${seconds}s`;
   return `${seconds}s`;
 }
+
+export function guestEndMessage(reason) {
+  if (reason === "revoked") return "Esse convite foi revogado. O link não está mais disponível.";
+  if (reason === "expired") return "O tempo desse convite acabou. O link não está mais disponível.";
+  return "Esse link não existe mais.";
+}

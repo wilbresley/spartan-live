@@ -166,8 +166,22 @@ test("um convite por vez, o convidado assiste e o link morto fica cinza", async 
     const ended = await ask(server, { path: "/api/me", cookie: guest });
     assert.equal(ended.status, 401);
     assert.equal(ended.json.guestEnded, true);
-    const page = await ask(server, { path: made.json.path });
-    assert.match(page.raw, /Esse link não existe mais/);
+    assert.equal(ended.json.guestEnd, "revoked");
+    assert.equal(ended.headers["set-cookie"], undefined);
+    const againEnded = await ask(server, { path: "/api/streams", cookie: guest });
+    assert.equal(againEnded.json.guestEnd, "revoked");
+    const page = await ask(server, { path: made.json.path, cookie: guest });
+    assert.match(page.raw, /Esse convite foi revogado/);
+
+    const expired = `spartan_live=${encodeURIComponent(signSession("spartan", Date.now(), {
+      role: "guest",
+      gid: made.json.path.slice(3),
+      exp: Date.now() - 1000,
+    }))}`;
+    const timedOut = await ask(server, { path: "/api/me", cookie: expired });
+    assert.equal(timedOut.json.guestEnd, "expired");
+    const timedPage = await ask(server, { path: made.json.path, cookie: expired });
+    assert.match(timedPage.raw, /O tempo desse convite acabou/);
 
     const fresh = await ask(server, {
       method: "POST",

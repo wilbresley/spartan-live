@@ -6,7 +6,7 @@ import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { loadPassword, savePassword, verifyPassword } from "./password.mjs";
 import { countViewers, dropViewer, touchViewer, SAD_GIFS } from "./public/theater.mjs";
-import { createGuest, guestActive } from "./public/guest-link.mjs";
+import { createGuest, guestActive, guestEndMessage } from "./public/guest-link.mjs";
 
 const PORT = Number(process.env.PORT || 8080);
 const VIEWER_USER = process.env.VIEWER_USER || "";
@@ -73,18 +73,19 @@ function clearGuest() {
 
 function openSession(req, now = Date.now()) {
   const data = readSession(cookies(req)[COOKIE], now);
-  if (!data) return { session: null, guestEnded: false };
-  if (data.role !== "guest") return { session: data, guestEnded: false };
+  if (!data) return { session: null, guestEnded: false, guestEnd: "" };
+  if (data.role !== "guest") return { session: data, guestEnded: false, guestEnd: "" };
   const invite = loadGuest(now);
-  if (invite && invite.id === data.gid && data.exp >= now) return { session: data, guestEnded: false };
-  return { session: null, guestEnded: true };
+  if (invite && invite.id === data.gid && data.exp >= now) return { session: data, guestEnded: false, guestEnd: "" };
+  return { session: null, guestEnded: true, guestEnd: data.exp < now ? "expired" : "revoked" };
 }
 
 function sessionFrom(req) {
   return openSession(req).session;
 }
 
-function sendGuestGone(res) {
+function sendGuestGone(res, reason = "") {
+  const line = guestEndMessage(reason);
   const html = `<!DOCTYPE html>
 <meta charset="utf-8">
 <title>Spartan Live</title>
@@ -96,7 +97,7 @@ function sendGuestGone(res) {
 <main>
   <div>
     <img id="gif" src="${SAD_GIFS[0]}" alt="">
-    <p>Esse link não existe mais.</p>
+    <p>${line}</p>
   </div>
 </main>
 <script>
@@ -706,7 +707,11 @@ async function handle(req, res) {
     const id = pathname.slice("/v/".length);
     const invite = /^[\w-]{16,64}$/.test(id) ? loadGuest() : null;
     if (!invite || invite.id !== id) {
-      sendGuestGone(res);
+      const data = readSession(cookies(req)[COOKIE]);
+      const reason = data?.role === "guest" && data.gid === id
+        ? (data.exp < Date.now() ? "expired" : "revoked")
+        : "";
+      sendGuestGone(res, reason);
       return;
     }
     const token = signSession(VIEWER_USER || "spartan", Date.now(), {
@@ -714,7 +719,7 @@ async function handle(req, res) {
       gid: invite.id,
       exp: invite.exp,
     });
-    const left = Math.max(1, Math.ceil((invite.exp - Date.now()) / 1000));
+    const left = Math.max(1, Math.ceil((invite.exp - Date.now()) / 1000)) + 24 * 60 * 60;
     res.writeHead(302, {
       Location: "/",
       "set-cookie": cookieHeader(token, req, false, left),
@@ -731,8 +736,10 @@ async function handle(req, res) {
 
   function linkEnded() {
     if (!opened.guestEnded) return false;
-    sendJson(res, 401, { error: "link acabou", guestEnded: true }, {
-      "set-cookie": cookieHeader("", req, true),
+    sendJson(res, 401, {
+      error: "link acabou",
+      guestEnded: true,
+      guestEnd: opened.guestEnd || "revoked",
     });
     return true;
   }

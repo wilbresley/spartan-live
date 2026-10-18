@@ -14,6 +14,7 @@ import {
   createTheaterState,
   createToastQueue,
   dismissActiveToast,
+  holdToast,
   dropViewer,
   enqueueArrivalToasts,
   pickNextGif,
@@ -92,30 +93,38 @@ test("volume permite boost até 200% mas salva no máximo 100% e inicia live em 
   assert.deepEqual(readPeerVolume(tampered, "Bresley"), { step: 100, muted: false });
 });
 
-test("balão de chegada entra em fila de 3s sem encavalar quando teatro ou tela cheia esconde a lista", () => {
-  assert.equal(TOAST_DURATION_MS, 3000);
+test("balão de chegada entra em fila de 5s sem encavalar e pausa com o mouse em cima", () => {
+  assert.equal(TOAST_DURATION_MS, 5000);
   assert.equal(shouldUseArrivalToast({ theaterOn: true, fullscreenActive: false, railVisible: false }), true);
   assert.equal(shouldUseArrivalToast({ theaterOn: false, fullscreenActive: true, railVisible: false }), true);
   assert.equal(shouldUseArrivalToast({ theaterOn: false, fullscreenActive: false, railVisible: false }), true);
   assert.equal(shouldUseArrivalToast({ theaterOn: false, fullscreenActive: false, railVisible: true }), false);
 
   let queue = createToastQueue();
-  queue = enqueueArrivalToasts(queue, ["Bresley", "Joao", "Pedro"], 1000, 3000);
-  assert.deepEqual(queue.active, { name: "Bresley", until: 4000 });
+  queue = enqueueArrivalToasts(queue, ["Bresley", "Joao", "Pedro"], 1000, 5000);
+  assert.deepEqual(queue.active, { name: "Bresley", until: 6000 });
   assert.deepEqual(queue.queue, ["Joao", "Pedro"]);
 
-  queue = tickToastQueue(queue, 2500, 3000);
+  queue = tickToastQueue(queue, 2500, 5000);
   assert.equal(queue.active.name, "Bresley");
 
-  queue = tickToastQueue(queue, 4000, 3000);
-  assert.deepEqual(queue.active, { name: "Joao", until: 7000 });
+  queue = holdToast(queue, true, 2000);
+  assert.equal(queue.active.paused, true);
+  assert.equal(queue.active.remaining, 4000);
+  queue = tickToastQueue(queue, 20000, 5000);
+  assert.equal(queue.active.name, "Bresley");
+  queue = holdToast(queue, false, 9000);
+  assert.equal(queue.active.until, 13000);
+
+  queue = tickToastQueue(queue, 13000, 5000);
+  assert.deepEqual(queue.active, { name: "Joao", until: 18000 });
   assert.deepEqual(queue.queue, ["Pedro"]);
 
-  queue = dismissActiveToast(queue, 5000, 3000);
-  assert.deepEqual(queue.active, { name: "Pedro", until: 8000 });
+  queue = dismissActiveToast(queue, 14000, 5000);
+  assert.deepEqual(queue.active, { name: "Pedro", until: 19000 });
   assert.deepEqual(queue.queue, []);
 
-  queue = tickToastQueue(queue, 8000, 3000);
+  queue = tickToastQueue(queue, 19000, 5000);
   assert.equal(queue.active, null);
   assert.deepEqual(queue.queue, []);
 });

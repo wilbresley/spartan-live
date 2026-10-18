@@ -1,5 +1,5 @@
 import { formatOnAir, isFollowingLive, liveLedSynced, playbackGlitch, rewindWindow, shouldSnapToLive } from "./buffer-math.mjs";
-import { guestRemainLabel } from "./guest-link.mjs";
+import { guestEndMessage, guestRemainLabel } from "./guest-link.mjs";
 import { dueChimes, freshArrivals, nextPresence } from "./presence.mjs";
 import { peekSecondsLeft, railAfterEmpty, railAfterEnter, railAfterInteract, railAfterTick, railAfterToggle, visualRailOpen } from "./rail-peek.mjs";
 import { claimReturn, pruneReturns, rememberReturn } from "./quick-return.mjs";
@@ -15,6 +15,7 @@ import {
   createTheaterState,
   createToastQueue,
   dismissActiveToast,
+  holdToast,
   enqueueArrivalToasts,
   pickNextGif,
   pairStacks,
@@ -57,6 +58,7 @@ const guestHours = document.querySelector("#guest-hours");
 const guestClock = document.querySelector("#guest-clock");
 const guestCopy = document.querySelector("#guest-copy");
 const guestRevoke = document.querySelector("#guest-revoke");
+const guestRevokeAsk = document.querySelector("#guest-revoke-ask");
 const guestGone = document.querySelector("#guest-gone");
 const guestGoneGif = document.querySelector("#guest-gone-gif");
 
@@ -127,16 +129,34 @@ let hoveredPeer = null;
 let theaterState = createTheaterState();
 let toastState = createToastQueue();
 
-const arrivalToast = document.createElement("button");
-arrivalToast.type = "button";
+const arrivalToast = document.createElement("div");
 arrivalToast.className = "arrival-toast hidden";
-arrivalToast.setAttribute("aria-live", "polite");
+arrivalToast.setAttribute("role", "status");
+const arrivalToastOpen = document.createElement("button");
+arrivalToastOpen.type = "button";
+arrivalToastOpen.className = "arrival-toast-open";
 const arrivalToastDot = document.createElement("span");
 arrivalToastDot.className = "arrival-toast-dot";
 const arrivalToastText = document.createElement("span");
 arrivalToastText.className = "arrival-toast-text";
-arrivalToast.append(arrivalToastDot, arrivalToastText);
+arrivalToastOpen.append(arrivalToastDot, arrivalToastText);
+const arrivalToastClose = document.createElement("button");
+arrivalToastClose.type = "button";
+arrivalToastClose.className = "arrival-toast-close";
+arrivalToastClose.setAttribute("aria-label", "Fechar aviso");
+arrivalToastClose.textContent = "✕";
+arrivalToast.append(arrivalToastOpen, arrivalToastClose);
 if (appView) appView.append(arrivalToast);
+
+function arrivalToastOpenNow() {
+  return Boolean(toastState.active);
+}
+
+function syncToastHold() {
+  if (!toastState.active) return;
+  const next = holdToast(toastState, arrivalToast.matches(":hover"), Date.now());
+  if (next !== toastState) toastState = next;
+}
 
 function syncToastMount() {
   const host = document.fullscreenElement || appView || document.body;
@@ -156,6 +176,7 @@ function paintArrivalToast() {
   arrivalToast.dataset.peer = active.name;
   arrivalToastText.textContent = `${active.name} entrou online — clique para assistir`;
   arrivalToast.classList.remove("hidden");
+  syncToastHold();
 }
 
 function openToastStream(name) {
@@ -176,12 +197,29 @@ function openToastStream(name) {
   created?.resume?.();
 }
 
-arrivalToast.addEventListener("click", (event) => {
-  event.stopPropagation();
-  const targetName = arrivalToast.dataset.peer || toastState.active?.name || "";
+function dismissArrivalToast() {
   toastState = dismissActiveToast(toastState, Date.now());
   paintArrivalToast();
+}
+
+arrivalToastOpen.addEventListener("click", (event) => {
+  event.stopPropagation();
+  const targetName = arrivalToast.dataset.peer || toastState.active?.name || "";
+  dismissArrivalToast();
   if (targetName) openToastStream(targetName);
+});
+
+arrivalToastClose.addEventListener("click", (event) => {
+  event.stopPropagation();
+  dismissArrivalToast();
+});
+
+arrivalToast.addEventListener("pointerenter", () => {
+  toastState = holdToast(toastState, true, Date.now());
+});
+
+arrivalToast.addEventListener("pointerleave", () => {
+  toastState = holdToast(toastState, false, Date.now());
 });
 
 document.addEventListener("fullscreenchange", () => {
@@ -420,6 +458,7 @@ async function flushChime(now) {
 let viewerRole = "owner";
 let guestInvite = null;
 let guestPicking = false;
+let guestPickTimer = 0;
 let guestCopyTimer = 0;
 let guestGoneTimer = 0;
 let guestGifIndex = 0;
@@ -431,7 +470,10 @@ function hideGuestGone() {
   guestGone.classList.add("hidden");
 }
 
-function showGuestGone() {
+function showGuestGone(reason) {
+  const line = guestGone.querySelector("p");
+  if (line) line.textContent = guestEndMessage(reason);
+  if (!guestGone.classList.contains("hidden")) return;
   window.clearInterval(guestGoneTimer);
   stopAll();
   loginView.classList.add("hidden");
@@ -450,11 +492,14 @@ function paintGuest() {
   const active = Boolean(guestInvite && guestInvite.exp > Date.now());
   if (!active && viewerRole === "guest" && guestInvite) {
     guestInvite = null;
-    showGuestGone();
+    showGuestGone("expired");
     return;
   }
   if (!active) guestInvite = null;
-  if (active) guestPicking = false;
+  if (active) {
+    guestPicking = false;
+    window.clearTimeout(guestPickTimer);
+  }
   const guestView = viewerRole === "guest";
   guestGenerate.classList.toggle("hidden", active || guestPicking || guestView);
   guestHours.classList.toggle("hidden", !guestPicking || guestView);
@@ -470,7 +515,7 @@ async function loadGuestBar() {
     const data = await api("/api/guest");
     guestInvite = data.active ? data : null;
   } catch (error) {
-    if (error.guestEnded) showGuestGone();
+    if (error.guestEnded) showGuestGone(error.guestEnd);
     return;
   }
   paintGuest();
@@ -483,6 +528,7 @@ function showLogin() {
   viewerRole = "owner";
   guestInvite = null;
   guestPicking = false;
+  window.clearTimeout(guestPickTimer);
   document.body.dataset.guest = "";
   appView.classList.add("hidden");
   passwordView.classList.add("hidden");
@@ -520,6 +566,7 @@ async function api(path, options = {}) {
     error.status = response.status;
     error.mustChange = Boolean(data.mustChange);
     error.guestEnded = Boolean(data.guestEnded);
+    error.guestEnd = data.guestEnd || "";
     throw error;
   }
   return data;
@@ -726,6 +773,7 @@ function noteRailEmpty() {
 }
 
 function noteRailInteraction(event) {
+  if (arrivalToastOpenNow()) return;
   if (event.target instanceof Element && event.target.closest("#rail-toggle")) return;
   const next = railAfterInteract(railState, Date.now());
   if (next === railState) return;
@@ -1549,7 +1597,7 @@ async function refresh() {
     await flushChime(now);
   } catch (error) {
     if (error.guestEnded) {
-      showGuestGone();
+      showGuestGone(error.guestEnd);
       return;
     }
     if (error.mustChange) {
@@ -1615,7 +1663,7 @@ if (theaterButton) {
 }
 
 document.addEventListener("mousemove", (event) => {
-  if (appView.classList.contains("hidden")) return;
+  if (appView.classList.contains("hidden") || arrivalToastOpenNow()) return;
   const next = theaterAfterMove(theaterState, event.clientY, Date.now(), 58);
   if (
     next.manual !== theaterState.manual ||
@@ -1630,7 +1678,7 @@ document.addEventListener("mousemove", (event) => {
 });
 
 window.setInterval(() => {
-  if (appView.classList.contains("hidden")) return;
+  if (appView.classList.contains("hidden") || arrivalToastOpenNow()) return;
   const next = theaterAfterTick(theaterState, anyPlayingPeer(), Date.now());
   if (next.auto !== theaterState.auto || next.manual !== theaterState.manual) {
     theaterState = next;
@@ -1750,6 +1798,7 @@ const gridButton = document.querySelector("#grid-fullscreen");
 const gridExit = document.querySelector("#grid-exit");
 let hideGridExit = 0;
 function showGridExit() {
+  if (arrivalToastOpenNow()) return;
   if (document.fullscreenElement !== videoContainer) return;
   videoContainer.classList.add("grid-hot");
   window.clearTimeout(hideGridExit);
@@ -1824,12 +1873,19 @@ logoutButton.addEventListener("click", async () => {
 guestGenerate.addEventListener("click", () => {
   guestPicking = true;
   paintGuest();
+  window.clearTimeout(guestPickTimer);
+  guestPickTimer = window.setTimeout(() => {
+    if (!guestPicking) return;
+    guestPicking = false;
+    paintGuest();
+  }, 5000);
 });
 
 guestHours.addEventListener("click", async (event) => {
   const button = event.target.closest("button");
   const hours = Number(button?.dataset.hours);
   if (!hours) return;
+  window.clearTimeout(guestPickTimer);
   try {
     guestInvite = await api("/api/guest", { method: "POST", body: JSON.stringify({ hours }) });
     guestPicking = false;
@@ -1862,7 +1918,20 @@ guestCopy.addEventListener("click", async () => {
   }, 2000);
 });
 
-guestRevoke.addEventListener("click", async () => {
+guestRevoke.addEventListener("click", () => {
+  guestRevokeAsk.classList.remove("hidden");
+});
+
+document.querySelector("#guest-revoke-cancel").addEventListener("click", () => {
+  guestRevokeAsk.classList.add("hidden");
+});
+
+guestRevokeAsk.addEventListener("click", (event) => {
+  if (event.target === guestRevokeAsk) guestRevokeAsk.classList.add("hidden");
+});
+
+document.querySelector("#guest-revoke-confirm").addEventListener("click", async () => {
+  guestRevokeAsk.classList.add("hidden");
   await api("/api/guest/revoke", { method: "POST", body: "{}" });
   guestInvite = null;
   guestPicking = false;
@@ -1886,6 +1955,7 @@ window.addEventListener("pagehide", () => {
   window.clearInterval(timer);
   window.clearInterval(guestClockTimer);
   window.clearInterval(guestGoneTimer);
+  window.clearTimeout(guestPickTimer);
 });
 
 api("/api/me")
@@ -1903,6 +1973,6 @@ api("/api/me")
     return refresh();
   })
   .catch((error) => {
-    if (error.guestEnded) showGuestGone();
+    if (error.guestEnded) showGuestGone(error.guestEnd);
     else showLogin();
   });

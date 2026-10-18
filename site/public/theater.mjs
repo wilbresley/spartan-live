@@ -59,7 +59,7 @@ export function theaterHeaderVisible(state) {
 
 export const MAX_VOLUME_STEP = 200;
 export const MAX_SAVED_VOLUME_STEP = 100;
-export const TOAST_DURATION_MS = 3000;
+export const TOAST_DURATION_MS = 5000;
 
 export function clampVolumeStep(percent, maxStep = MAX_VOLUME_STEP) {
   const num = Number(percent);
@@ -132,6 +132,7 @@ export function tickToastQueue(state, now = 0, durationMs = TOAST_DURATION_MS) {
     if (!state?.queue?.length) return state || createToastQueue();
     return enqueueArrivalToasts(state, [], now, durationMs);
   }
+  if (state.active.paused) return state;
   if (now < state.active.until) return state;
   const queue = Array.isArray(state.queue) ? [...state.queue] : [];
   if (queue.length === 0) {
@@ -153,6 +154,23 @@ export function dismissActiveToast(state, now = 0, durationMs = TOAST_DURATION_M
   return {
     active: { name: nextName, until: now + durationMs },
     queue,
+  };
+}
+
+export function holdToast(state, holding, now = 0) {
+  if (!state?.active) return state || createToastQueue();
+  const active = state.active;
+  if (holding) {
+    if (active.paused) return state;
+    return {
+      active: { ...active, paused: true, remaining: Math.max(0, active.until - now) },
+      queue: state.queue,
+    };
+  }
+  if (!active.paused) return state;
+  return {
+    active: { name: active.name, until: now + Math.max(0, Number(active.remaining) || 0) },
+    queue: state.queue,
   };
 }
 

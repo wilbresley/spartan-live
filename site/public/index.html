@@ -106,6 +106,17 @@
     <p>Esse link não existe mais.</p>
   </section>
 
+  <div id="guest-revoke-ask" class="hidden" role="dialog" aria-modal="true" aria-labelledby="guest-revoke-title">
+    <div class="guest-revoke-card">
+      <h2 id="guest-revoke-title">Revogar o convite?</h2>
+      <p>Se você revogar o link, as pessoas que estão vendo como convidados perdem o acesso na hora. Cancelar deixa o convite valendo até o tempo acabar.</p>
+      <div class="guest-revoke-actions">
+        <button id="guest-revoke-cancel" type="button">Cancelar</button>
+        <button id="guest-revoke-confirm" type="button">Revogar</button>
+      </div>
+    </div>
+  </div>
+
   <script src="/hls.min.js"></script>
   <script type="module" src="/app.js"></script>
 </body>

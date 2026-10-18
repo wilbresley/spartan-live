@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createGuest, guestActive, guestHours, guestRemainLabel } from "./public/guest-link.mjs";
+import { createGuest, guestActive, guestEndMessage, guestHours, guestRemainLabel } from "./public/guest-link.mjs";
 
 test("o convite só aceita 3, 6, 12 ou 24 horas e o endereço não se repete", () => {
   assert.equal(guestHours(12), 12);
@@ -22,4 +22,7 @@ test("convite vencido some e o relógio mostra o que falta", () => {
   assert.equal(guestRemainLabel(invite.exp, invite.exp - (11 * 3600 + 42 * 60) * 1000), "11h 42min");
   assert.equal(guestRemainLabel(90_000, 0), "1min 30s");
   assert.equal(guestRemainLabel(5_000, 0), "5s");
+  assert.equal(guestEndMessage("revoked"), "Esse convite foi revogado. O link não está mais disponível.");
+  assert.equal(guestEndMessage("expired"), "O tempo desse convite acabou. O link não está mais disponível.");
+  assert.equal(guestEndMessage(""), "Esse link não existe mais.");
 });
