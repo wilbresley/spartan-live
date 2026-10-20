@@ -47,14 +47,24 @@ export function normalizeGuestStore(raw, now = Date.now()) {
   return { temporary: null, permanent: null };
 }
 
-export function findGuestInvite(store, id, now = Date.now()) {
+/** Compara o gid direto com guest.json — permanente nunca vira temporário. */
+export function detectGuestKind(store, gid, now = Date.now()) {
   const book = normalizeGuestStore(store, now);
-  if (book.permanent?.id === id) return { invite: book.permanent, kind: "permanent" };
+  const id = String(gid || "");
+  if (!id) return null;
+  if (book.permanent?.id === id) {
+    return { kind: "permanent", invite: book.permanent, accessId: ACCESS_PERM };
+  }
   if (book.temporary?.id === id) {
-    const kind = book.temporary.kind === "permanent" ? "permanent" : "temporary";
-    return { invite: book.temporary, kind };
+    return { kind: "temporary", invite: book.temporary, accessId: ACCESS_TEMP };
   }
   return null;
+}
+
+export function findGuestInvite(store, id, now = Date.now()) {
+  const found = detectGuestKind(store, id, now);
+  if (!found) return null;
+  return { invite: found.invite, kind: found.kind };
 }
 
 export function guestRemainLabel(exp, now = Date.now()) {

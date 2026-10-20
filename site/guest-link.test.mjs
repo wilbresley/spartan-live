@@ -4,6 +4,9 @@ import test from "node:test";
 import {
   createGuest,
   createPermanentGuest,
+  ACCESS_PERM,
+  ACCESS_TEMP,
+  detectGuestKind,
   findGuestInvite,
   guestActive,
   guestEndMessage,
@@ -50,6 +53,8 @@ test("link permanente fica até revogar e convive com o temporário", () => {
   assert.equal(store.permanent.id, "dddddddddddddddd");
   assert.equal(findGuestInvite(store, "dddddddddddddddd", 2_000).kind, "permanent");
   assert.equal(findGuestInvite(store, "eeeeeeeeeeeeeeee", 2_000).kind, "temporary");
+  assert.equal(detectGuestKind(store, "dddddddddddddddd", 2_000)?.accessId, ACCESS_PERM);
+  assert.equal(detectGuestKind(store, "eeeeeeeeeeeeeeee", 2_000)?.accessId, ACCESS_TEMP);
   const legacy = normalizeGuestStore(createGuest(6, 1_000, "ffffffffffffffff"), 2_000);
   assert.equal(legacy.temporary.id, "ffffffffffffffff");
   assert.equal(legacy.permanent, null);

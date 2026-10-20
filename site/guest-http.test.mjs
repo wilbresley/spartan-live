@@ -239,6 +239,16 @@ test("um convite por vez, o convidado assiste e o link morto fica cinza", async 
     });
     assert.equal(guestMaySee(permSession, "ana"), false);
     assert.equal(guestMaySee(tempSession, "ana"), false);
+    // Aliases do programa / payloads antigos (guests + permanent).
+    const shareAlias = await ask(server, {
+      method: "POST",
+      path: "/api/share",
+      body: JSON.stringify({ name: "ana", user: "pub", password: "pub-segredo", guests: false, permanent: true }),
+    });
+    assert.equal(shareAlias.json.guestsTemp, false);
+    assert.equal(shareAlias.json.guestsPerm, true);
+    assert.equal(guestMaySee(permSession, "ana"), true);
+    assert.equal(guestMaySee(tempSession, "ana"), false);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     fs.rmSync(dataDir, { recursive: true, force: true });

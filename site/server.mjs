@@ -12,6 +12,7 @@ import {
   ACCESS_TEMP,
   createGuest,
   createPermanentGuest,
+  detectGuestKind,
   findGuestInvite,
   guestEndMessage,
   normalizeGuestStore,
@@ -91,11 +92,18 @@ function openSession(req, now = Date.now()) {
   if (data.role !== "guest") {
     return { session: { ...data, accessId: ACCESS_OWNER }, guestEnded: false, guestEnd: "" };
   }
-  const found = findGuestInvite(loadGuestStore(now), data.gid, now);
-  if (found && data.exp >= now) {
-    const accessId = accessIdFromKind(found.kind);
+  // Sempre resolve pelo guest.json atual — cookie antigo com kind errado não manda.
+  const found = detectGuestKind(loadGuestStore(now), data.gid, now);
+  const stillValid = found
+    && (found.kind === "permanent" || (typeof data.exp === "number" && data.exp >= now));
+  if (stillValid) {
     return {
-      session: { ...data, kind: found.kind, accessId },
+      session: {
+        ...data,
+        kind: found.kind,
+        accessId: found.accessId,
+        exp: found.kind === "permanent" ? (found.invite.exp || data.exp) : data.exp,
+      },
       guestEnded: false,
       guestEnd: "",
     };
@@ -171,18 +179,17 @@ function shareFlags(name) {
 
 export function guestInviteKind(session, now = Date.now()) {
   if (!session || session.role !== "guest") return "";
-  const found = findGuestInvite(loadGuestStore(now), session.gid, now);
-  if (found?.kind === "permanent" || found?.kind === "temporary") return found.kind;
-  if (session.kind === "permanent" || session.kind === "temporary") return session.kind;
-  return "";
+  const found = detectGuestKind(loadGuestStore(now), session.gid, now);
+  return found ? found.kind : "";
 }
 
-/** 1 senha, 2 temporário, 3 permanente — a loja de convites manda no convidado. */
+/** 1 senha, 2 temporário, 3 permanente — sempre pelo gid no guest.json. */
 export function accessIdOf(session, now = Date.now()) {
   if (!session) return 0;
   if (session.role !== "guest") return ACCESS_OWNER;
-  if (session.accessId === ACCESS_PERM || session.accessId === ACCESS_TEMP) return session.accessId;
-  return accessIdFromKind(guestInviteKind(session, now));
+  const found = detectGuestKind(loadGuestStore(now), session.gid, now);
+  if (found) return found.accessId;
+  return 0;
 }
 
 export function guestMaySee(session, name, now = Date.now()) {
@@ -190,9 +197,17 @@ export function guestMaySee(session, name, now = Date.now()) {
   if (id === ACCESS_OWNER) return true;
   if (id === 0) return false;
   const flags = shareFlags(name);
-  if (id === ACCESS_TEMP) return flags.guestsTemp;
-  if (id === ACCESS_PERM) return flags.guestsPerm;
+  if (id === ACCESS_TEMP) return Boolean(flags.guestsTemp);
+  if (id === ACCESS_PERM) return Boolean(flags.guestsPerm);
   return false;
+}
+
+function pickShareFlag(body, keys) {
+  if (!body || typeof body !== "object") return undefined;
+  for (const key of keys) {
+    if (body[key] !== undefined) return asFlag(body[key]);
+  }
+  return undefined;
 }
 
 export function rememberShare(name, guestsTemp, guestsPerm) {
@@ -793,12 +808,10 @@ async function handle(req, res) {
       sendJson(res, 401, { error: "nao autorizado" });
       return;
     }
-    // guestsTemp = libera accessId 2; guestsPerm = libera accessId 3
-    rememberShare(
-      name,
-      body.allowTemp !== undefined ? body.allowTemp : body.guestsTemp,
-      body.allowPerm !== undefined ? body.allowPerm : body.guestsPerm,
-    );
+    // accessId 2 = temporário; accessId 3 = permanente
+    const allowTemp = pickShareFlag(body, ["allowTemp", "guestsTemp", "temporary", "temp", "guests"]);
+    const allowPerm = pickShareFlag(body, ["allowPerm", "guestsPerm", "permanent", "perm"]);
+    rememberShare(name, allowTemp === undefined ? false : allowTemp, allowPerm === undefined ? false : allowPerm);
     const flags = shareFlags(name);
     sendJson(res, 200, {
       ok: true,
@@ -917,7 +930,7 @@ async function handle(req, res) {
       const body = await readJson(req);
       const store = loadGuestStore();
       const token = crypto.randomBytes(18).toString("base64url");
-      if (body.permanent) {
+      if (body.permanent || body.kind === "permanent") {
         if (store.permanent) {
           sendJson(res, 409, { error: "ja existe um link permanente" });
           return;
@@ -996,8 +1009,10 @@ async function handle(req, res) {
     const stopped = currentStopped(live);
     const gone = new Set(stopped);
     const now = Date.now();
-    const streams = live
-      .filter((stream) => !gone.has(stream.name) && guestMaySee(session, stream.name))
+    // Lives ativas (sem filtro de convidado) — thumb não some se o convidado não pode ver.
+    const visibleLive = live.filter((stream) => !gone.has(stream.name));
+    const streams = visibleLive
+      .filter((stream) => guestMaySee(session, stream.name))
       .map((stream) => ({
         ...stream,
         thumbAt: thumbStamp(stream.name),
@@ -1005,9 +1020,10 @@ async function handle(req, res) {
         guests: countViewers(guestsByStream, stream.name, now),
         permanent: countViewers(permanentGuestsByStream, stream.name, now),
       }));
-    const switching = collectSwitching(switchingUntil, streams).filter((name) => guestMaySee(session, name));
+    const switchingAll = collectSwitching(switchingUntil, visibleLive);
+    const switching = switchingAll.filter((name) => guestMaySee(session, name));
     const switchingKinds = collectSwitchKinds(switchingUntil);
-    sweepThumbs(streams.map((stream) => stream.name), switching);
+    sweepThumbs(visibleLive.map((stream) => stream.name), switchingAll);
     sendJson(res, 200, { streams, stopped, switching, switchingKinds });
     return;
   }
@@ -1032,6 +1048,10 @@ async function handle(req, res) {
   if (req.method === "GET" && pathname.startsWith("/api/thumb/")) {
     if (needsLogin() || ownerLocked()) return;
     const name = pathname.slice("/api/thumb/".length);
+    if (!guestMaySee(session, name)) {
+      sendJson(res, 404, { error: "sem imagem" });
+      return;
+    }
     const filePath = thumbFile(name);
     if (!filePath || !fs.existsSync(filePath)) {
       sendJson(res, 404, { error: "sem imagem" });
