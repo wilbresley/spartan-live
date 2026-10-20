@@ -111,10 +111,26 @@ function advanceHappyGif() {
   }
 }
 
+let emptyRotateTimer = 0;
+function stopEmptyRotate() {
+  window.clearInterval(emptyRotateTimer);
+  emptyRotateTimer = 0;
+}
+
+function startEmptyRotate() {
+  stopEmptyRotate();
+  emptyRotateTimer = window.setInterval(() => {
+    if (!empty || empty.classList.contains("hidden")) return;
+    if (currentEmptyMode === "happy") advanceHappyGif();
+    else advanceSadGif();
+  }, 5000);
+}
+
 if (emptyGif) {
   emptyGif.addEventListener("error", () => emptyGif.classList.add("is-broken"));
   emptyGif.addEventListener("load", () => emptyGif.classList.remove("is-broken"));
   advanceSadGif();
+  startEmptyRotate();
 }
 
 const VOLUME_MAP_KEY = "spartan-live-peer-volumes";
@@ -634,6 +650,7 @@ function showVideo() {
   empty.classList.toggle("hidden", watching);
   videoContainer.classList.toggle("hidden", !watching);
   if (!watching) {
+    startEmptyRotate();
     if (anyoneOnline) {
       if (emptyText) emptyText.textContent = "Tem gente ao vivo! Escolha uma live ao lado para assistir.";
       if (currentEmptyMode !== "happy") advanceHappyGif();
@@ -641,6 +658,8 @@ function showVideo() {
       if (emptyText) emptyText.textContent = "Ninguém está transmitindo agora.";
       if (currentEmptyMode !== "sad") advanceSadGif();
     }
+  } else {
+    stopEmptyRotate();
   }
 }
 
@@ -2075,7 +2094,9 @@ api("/api/me")
       return;
     }
     viewerRole = me.role === "guest" ? "guest" : "owner";
-    viewerGuestKind = me.kind || "";
+    if (Number(me.accessId) === 3) viewerGuestKind = "permanent";
+    else if (Number(me.accessId) === 2) viewerGuestKind = "temporary";
+    else viewerGuestKind = me.kind || "";
     document.body.dataset.guest = viewerRole === "guest" ? "1" : "";
     if (viewerRole === "guest" && Number(me.exp) > Date.now()) {
       if (viewerGuestKind === "permanent") guestPermInvite = { exp: me.exp };

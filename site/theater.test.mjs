@@ -151,6 +151,9 @@ test("contador de espectadores soma quem está assistindo, remove na hora ao pau
 test("roleta de gifs de triste e feliz percorre todos os itens sem repetir até fechar o ciclo", () => {
   assert.equal(SAD_GIFS.length, 12);
   assert.equal(HAPPY_GIFS.length, 12);
+  assert.ok(SAD_GIFS.every((src) => /^\/gifs\/sad-\d+\.gif\?v3$/.test(src)));
+  assert.ok(HAPPY_GIFS.every((src) => /^\/gifs\/happy-\d+\.gif\?v3$/.test(src)));
+  assert.ok(!SAD_GIFS.some((src) => src.includes("empty-sad")));
 
   let idx = -1;
   const seenSad = [];

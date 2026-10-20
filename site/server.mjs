@@ -7,6 +7,9 @@ import { fileURLToPath } from "node:url";
 import { loadPassword, savePassword, verifyPassword } from "./password.mjs";
 import { countViewers, dropViewer, touchViewer, SAD_GIFS } from "./public/theater.mjs";
 import {
+  ACCESS_OWNER,
+  ACCESS_PERM,
+  ACCESS_TEMP,
   createGuest,
   createPermanentGuest,
   findGuestInvite,
@@ -76,13 +79,26 @@ function saveGuestStore(store) {
   fs.renameSync(temp, GUEST_FILE);
 }
 
+function accessIdFromKind(kind) {
+  if (kind === "permanent") return ACCESS_PERM;
+  if (kind === "temporary") return ACCESS_TEMP;
+  return 0;
+}
+
 function openSession(req, now = Date.now()) {
   const data = readSession(cookies(req)[COOKIE], now);
   if (!data) return { session: null, guestEnded: false, guestEnd: "" };
-  if (data.role !== "guest") return { session: data, guestEnded: false, guestEnd: "" };
+  if (data.role !== "guest") {
+    return { session: { ...data, accessId: ACCESS_OWNER }, guestEnded: false, guestEnd: "" };
+  }
   const found = findGuestInvite(loadGuestStore(now), data.gid, now);
   if (found && data.exp >= now) {
-    return { session: { ...data, kind: found.kind }, guestEnded: false, guestEnd: "" };
+    const accessId = accessIdFromKind(found.kind);
+    return {
+      session: { ...data, kind: found.kind, accessId },
+      guestEnded: false,
+      guestEnd: "",
+    };
   }
   return { session: null, guestEnded: true, guestEnd: data.exp < now ? "expired" : "revoked" };
 }
@@ -140,6 +156,10 @@ function guestBarPayload(store) {
   };
 }
 
+function asFlag(value) {
+  return value === true || value === 1 || value === "true";
+}
+
 function shareFlags(name) {
   const mark = shareByStream.get(name);
   if (!mark) return { guestsTemp: false, guestsPerm: false };
@@ -151,27 +171,35 @@ function shareFlags(name) {
 
 export function guestInviteKind(session, now = Date.now()) {
   if (!session || session.role !== "guest") return "";
-  // O arquivo de convites manda: cookie antigo com kind errado não vira temporário.
   const found = findGuestInvite(loadGuestStore(now), session.gid, now);
   if (found?.kind === "permanent" || found?.kind === "temporary") return found.kind;
   if (session.kind === "permanent" || session.kind === "temporary") return session.kind;
   return "";
 }
 
+/** 1 senha, 2 temporário, 3 permanente — a loja de convites manda no convidado. */
+export function accessIdOf(session, now = Date.now()) {
+  if (!session) return 0;
+  if (session.role !== "guest") return ACCESS_OWNER;
+  if (session.accessId === ACCESS_PERM || session.accessId === ACCESS_TEMP) return session.accessId;
+  return accessIdFromKind(guestInviteKind(session, now));
+}
+
 export function guestMaySee(session, name, now = Date.now()) {
-  if (!session || session.role !== "guest") return true;
+  const id = accessIdOf(session, now);
+  if (id === ACCESS_OWNER) return true;
+  if (id === 0) return false;
   const flags = shareFlags(name);
-  const kind = guestInviteKind(session, now);
-  if (kind === "permanent") return flags.guestsPerm;
-  if (kind === "temporary") return flags.guestsTemp;
+  if (id === ACCESS_TEMP) return flags.guestsTemp;
+  if (id === ACCESS_PERM) return flags.guestsPerm;
   return false;
 }
 
 export function rememberShare(name, guestsTemp, guestsPerm) {
   if (!safeStreamName(name)) return false;
   shareByStream.set(name, {
-    guestsTemp: guestsTemp === true || guestsTemp === 1 || guestsTemp === "true",
-    guestsPerm: guestsPerm === true || guestsPerm === 1 || guestsPerm === "true",
+    guestsTemp: asFlag(guestsTemp),
+    guestsPerm: asFlag(guestsPerm),
     at: Date.now(),
   });
   return true;
@@ -199,17 +227,16 @@ const STATIC = {
   "/spartan-live.png": { file: "spartan-live.png", type: "image/png", cache: "public, max-age=86400" },
   "/play.png": { file: "play.png", type: "image/png", cache: "no-cache" },
   "/pause.png": { file: "pause.png", type: "image/png", cache: "no-cache" },
-  "/empty-sad.gif": { file: "empty-sad.gif", type: "image/gif", cache: "public, max-age=86400" },
   ...Object.fromEntries(
     Array.from({ length: 12 }, (_, idx) => [
       `/gifs/sad-${idx + 1}.gif`,
-      { file: `gifs/sad-${idx + 1}.gif`, type: "image/gif", cache: "public, max-age=86400" },
+      { file: `gifs/sad-${idx + 1}.gif`, type: "image/gif", cache: "public, max-age=3600" },
     ])
   ),
   ...Object.fromEntries(
     Array.from({ length: 12 }, (_, idx) => [
       `/gifs/happy-${idx + 1}.gif`,
-      { file: `gifs/happy-${idx + 1}.gif`, type: "image/gif", cache: "public, max-age=86400" },
+      { file: `gifs/happy-${idx + 1}.gif`, type: "image/gif", cache: "public, max-age=3600" },
     ])
   ),
   "/hls.min.js": { file: "hls.min.js", type: "text/javascript; charset=utf-8", cache: "public, max-age=86400" },
@@ -227,6 +254,9 @@ export function signSession(user, now = Date.now(), extra = null) {
     if (extra.role) payload.role = extra.role;
     if (extra.gid) payload.gid = extra.gid;
     if (extra.kind) payload.kind = extra.kind;
+    if (extra.accessId === ACCESS_OWNER || extra.accessId === ACCESS_TEMP || extra.accessId === ACCESS_PERM) {
+      payload.accessId = extra.accessId;
+    }
     if (typeof extra.exp === "number") payload.exp = extra.exp;
   }
   const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
@@ -763,12 +793,19 @@ async function handle(req, res) {
       sendJson(res, 401, { error: "nao autorizado" });
       return;
     }
-    rememberShare(name, body.guestsTemp, body.guestsPerm);
+    // guestsTemp = libera accessId 2; guestsPerm = libera accessId 3
+    rememberShare(
+      name,
+      body.allowTemp !== undefined ? body.allowTemp : body.guestsTemp,
+      body.allowPerm !== undefined ? body.allowPerm : body.guestsPerm,
+    );
     const flags = shareFlags(name);
     sendJson(res, 200, {
       ok: true,
       guestsTemp: flags.guestsTemp,
       guestsPerm: flags.guestsPerm,
+      allowTemp: flags.guestsTemp,
+      allowPerm: flags.guestsPerm,
     });
     return;
   }
@@ -794,6 +831,7 @@ async function handle(req, res) {
       role: "guest",
       gid: invite.id,
       kind: found.kind,
+      accessId: accessIdFromKind(found.kind),
       exp: invite.exp,
     });
     const left = found.kind === "permanent"
@@ -840,10 +878,12 @@ async function handle(req, res) {
 
   if (req.method === "GET" && pathname === "/api/me") {
     if (needsLogin()) return;
+    const accessId = accessIdOf(session);
     sendJson(res, 200, {
       user: session.u,
       role: guest ? "guest" : "owner",
       kind: guest ? guestInviteKind(session) : "",
+      accessId,
       mustChange: guest ? false : Boolean(viewerRecord().mustChange),
       exp: guest ? session.exp : 0,
     });
@@ -919,12 +959,13 @@ async function handle(req, res) {
     if (needsLogin()) return;
     const body = await readJson(req);
     const names = Array.isArray(body.names) ? body.names : [];
-    const kind = guest ? guestInviteKind(session) : "";
+    const accessId = accessIdOf(session);
+    const kind = accessId === ACCESS_PERM ? "permanent" : (accessId === ACCESS_TEMP ? "temporary" : "");
     const viewerKey = watcherKey(req, guest, kind);
     const now = Date.now();
-    const book = !guest
+    const book = accessId === ACCESS_OWNER
       ? viewersByStream
-      : (kind === "permanent" ? permanentGuestsByStream : guestsByStream);
+      : (accessId === ACCESS_PERM ? permanentGuestsByStream : guestsByStream);
     for (const raw of names) {
       const name = String(raw || "");
       if (safeStreamName(name) && guestMaySee(session, name)) touchViewer(book, name, viewerKey, now);
@@ -938,7 +979,8 @@ async function handle(req, res) {
     const body = await readJson(req);
     const name = String(body.name || "");
     if (safeStreamName(name)) {
-      const kind = guest ? guestInviteKind(session) : "";
+      const accessId = accessIdOf(session);
+      const kind = accessId === ACCESS_PERM ? "permanent" : (accessId === ACCESS_TEMP ? "temporary" : "");
       const viewerKey = watcherKey(req, guest, kind);
       dropViewer(viewersByStream, name, viewerKey);
       dropViewer(guestsByStream, name, viewerKey);

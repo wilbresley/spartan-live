@@ -1,6 +1,10 @@
 export const GUEST_HOURS = [3, 6, 12, 24];
 export const PERMANENT_HOLD_MS = 10_000;
 export const PERMANENT_SESSION_MS = 10 * 365 * 24 * 60 * 60 * 1000;
+/** 1 = conta com senha, 2 = convidado temporário, 3 = convidado permanente */
+export const ACCESS_OWNER = 1;
+export const ACCESS_TEMP = 2;
+export const ACCESS_PERM = 3;
 
 export function guestHours(value) {
   const hours = Number(value);

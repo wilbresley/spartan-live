@@ -402,8 +402,11 @@ def post_share(host, nick, user, password, guests_temp, guests_perm):
         "name": nick,
         "user": user,
         "password": password,
+        # accessId 2 = temporário, accessId 3 = permanente
         "guestsTemp": temp,
         "guestsPerm": perm,
+        "allowTemp": temp,
+        "allowPerm": perm,
     }).encode("utf-8")
     last = "falhou"
     for url in targets:

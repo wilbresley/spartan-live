@@ -216,8 +216,9 @@ export function countViewers(book, name, now = Date.now(), ttlMs = VIEWER_TTL_MS
   return room.size;
 }
 
-export const SAD_GIFS = Array.from({ length: 12 }, (_, idx) => `/gifs/sad-${idx + 1}.gif`);
-export const HAPPY_GIFS = Array.from({ length: 12 }, (_, idx) => `/gifs/happy-${idx + 1}.gif`);
+export const GIF_CACHE = "v3";
+export const SAD_GIFS = Array.from({ length: 12 }, (_, idx) => `/gifs/sad-${idx + 1}.gif?${GIF_CACHE}`);
+export const HAPPY_GIFS = Array.from({ length: 12 }, (_, idx) => `/gifs/happy-${idx + 1}.gif?${GIF_CACHE}`);
 
 export function nextCycleIndex(current, total) {
   const size = Math.max(1, Number(total) || 1);

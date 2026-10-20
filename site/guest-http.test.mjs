@@ -15,7 +15,7 @@ process.env.PUBLISH_USER = "pub";
 process.env.PUBLISH_PASSWORD = "pub-segredo";
 process.env.DATA_DIR = dataDir;
 
-const { onRequest, signSession, guestMaySee, rememberShare } = await import("./server.mjs");
+const { onRequest, signSession, guestMaySee, rememberShare, accessIdOf } = await import("./server.mjs");
 
 function listen() {
   const server = http.createServer(onRequest);
@@ -108,6 +108,7 @@ test("um convite por vez, o convidado assiste e o link morto fica cinza", async 
     const me = await ask(server, { path: "/api/me", cookie: guest });
     assert.equal(me.json.role, "guest");
     assert.equal(me.json.kind, "temporary");
+    assert.equal(me.json.accessId, 2);
     assert.equal(me.json.mustChange, false);
     assert.ok(me.json.exp > Date.now());
 
@@ -138,6 +139,7 @@ test("um convite por vez, o convidado assiste e o link morto fica cinza", async 
     const permGuest = cookieOf(permEnter.headers);
     const permMe = await ask(server, { path: "/api/me", cookie: permGuest });
     assert.equal(permMe.json.kind, "permanent");
+    assert.equal(permMe.json.accessId, 3);
 
     await ask(server, { method: "POST", path: "/api/unwatch", cookie: owner, body: JSON.stringify({ name: "ana" }) });
     const afterLeave = await ask(server, {
@@ -204,10 +206,13 @@ test("um convite por vez, o convidado assiste e o link morto fica cinza", async 
     }))}`;
     const fixedKind = await ask(server, { path: "/api/me", cookie: wrongKindCookie });
     assert.equal(fixedKind.json.kind, "permanent");
+    assert.equal(fixedKind.json.accessId, 3);
 
     rememberShare("ana", true, false);
     const permSession = { role: "guest", kind: "temporary", gid: permId };
     const tempSession = { role: "guest", kind: "permanent", gid: tempId };
+    assert.equal(accessIdOf(permSession), 3);
+    assert.equal(accessIdOf(tempSession), 2);
     assert.equal(guestMaySee(permSession, "ana"), false);
     assert.equal(guestMaySee(tempSession, "ana"), true);
     const shareOnlyPerm = await ask(server, {
