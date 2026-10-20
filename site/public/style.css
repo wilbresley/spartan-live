@@ -165,7 +165,8 @@ header {
 }
 
 #guest-tools,
-#guest-hours {
+#guest-hours,
+.guest-slot {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -173,8 +174,8 @@ header {
 
 body[data-guest="1"] #guest-generate,
 body[data-guest="1"] #guest-hours,
-body[data-guest="1"] #guest-copy,
-body[data-guest="1"] #guest-revoke,
+body[data-guest="1"] #guest-permanent,
+body[data-guest="1"] #guest-temporary,
 body[data-guest="1"] #gear-password,
 body[data-guest="1"] #download,
 body[data-guest="1"] #download-note,
@@ -185,8 +186,11 @@ body[data-guest="1"] #download-note,
 #guest-generate,
 #guest-hours button,
 #guest-revoke,
+#guest-perm-revoke,
 #guest-copy,
-#guest-clock {
+#guest-perm-copy,
+#guest-clock,
+.guest-tag {
   height: 32px;
   padding: 0 12px;
   border-radius: 8px;
@@ -196,20 +200,27 @@ body[data-guest="1"] #download-note,
 
 #guest-generate,
 #guest-hours button,
-#guest-revoke {
+#guest-revoke,
+#guest-perm-revoke {
   color: var(--text);
   background: transparent;
   border: 1px solid var(--line);
 }
 
-#guest-clock {
+#guest-clock,
+.guest-tag {
   color: #f6f1f1;
   background: var(--accent);
   border: 1px solid var(--accent-2);
   font-variant-numeric: tabular-nums;
 }
 
-#guest-copy {
+.guest-tag {
+  font-weight: 650;
+}
+
+#guest-copy,
+#guest-perm-copy {
   color: #102416;
   background: #3dbe6e;
   border: 1px solid #2d9154;
@@ -398,6 +409,7 @@ body[data-guest="1"] #download-note,
   flex-direction: column;
   flex: 0 0 auto;
   align-self: stretch;
+  width: 52px;
   min-height: 0;
   border-right: 1px solid var(--line);
 }
@@ -428,12 +440,6 @@ body[data-guest="1"] #download-note,
   align-items: center;
   gap: 8px;
   margin: 10px;
-}
-
-.rail-count {
-  color: #f07171;
-  font-size: 13px;
-  font-variant-numeric: tabular-nums;
 }
 
 #rail-toggle {

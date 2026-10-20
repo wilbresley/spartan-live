@@ -1,7 +1,7 @@
 import { formatOnAir, isFollowingLive, liveLedSynced, playbackGlitch, rewindWindow, shouldSnapToLive } from "./buffer-math.mjs";
-import { guestEndMessage, guestRemainLabel } from "./guest-link.mjs";
+import { guestEndMessage, guestRemainLabel, PERMANENT_HOLD_MS } from "./guest-link.mjs";
 import { dueChimes, freshArrivals, nextPresence } from "./presence.mjs";
-import { peekSecondsLeft, railAfterEmpty, railAfterEnter, railAfterInteract, railAfterTick, railAfterToggle, visualRailOpen } from "./rail-peek.mjs";
+import { createRailState, railAfterEmpty, railAfterHover, railAfterPinToggle, visualRailOpen } from "./rail-peek.mjs";
 import { claimReturn, pruneReturns, rememberReturn } from "./quick-return.mjs";
 import { screenPhase } from "./screen-switch.mjs";
 import {
@@ -43,7 +43,6 @@ const settingsPop = document.querySelector("#settings-pop");
 const videoContainer = document.querySelector("#video-container");
 const railWrap = document.querySelector("#rail-wrap");
 const railToggle = document.querySelector("#rail-toggle");
-const railCount = document.querySelector("#rail-count");
 const rail = document.querySelector("#live-rail");
 const peersEl = document.querySelector("#peers");
 const hiddenLives = document.querySelector("#hidden-lives");
@@ -55,9 +54,13 @@ const logoutButton = document.querySelector("#logout");
 const theaterButton = document.querySelector("#theater-toggle");
 const guestGenerate = document.querySelector("#guest-generate");
 const guestHours = document.querySelector("#guest-hours");
+const guestPermSlot = document.querySelector("#guest-permanent");
+const guestTempSlot = document.querySelector("#guest-temporary");
 const guestClock = document.querySelector("#guest-clock");
 const guestCopy = document.querySelector("#guest-copy");
 const guestRevoke = document.querySelector("#guest-revoke");
+const guestPermCopy = document.querySelector("#guest-perm-copy");
+const guestPermRevoke = document.querySelector("#guest-perm-revoke");
 const guestRevokeAsk = document.querySelector("#guest-revoke-ask");
 const guestGone = document.querySelector("#guest-gone");
 const guestGoneGif = document.querySelector("#guest-gone-gif");
@@ -456,12 +459,17 @@ async function flushChime(now) {
   }
 }
 let viewerRole = "owner";
-let guestInvite = null;
+let viewerGuestKind = "";
+let guestTempInvite = null;
+let guestPermInvite = null;
 let guestPicking = false;
 let guestPickTimer = 0;
+let guestHoldTimer = 0;
+let guestHoldDone = false;
 let guestCopyTimer = 0;
 let guestGoneTimer = 0;
 let guestGifIndex = 0;
+let guestRevokeKind = "temporary";
 let manualFocus = null;
 let autoFocus = false;
 
@@ -489,31 +497,32 @@ function showGuestGone(reason) {
 }
 
 function paintGuest() {
-  const active = Boolean(guestInvite && guestInvite.exp > Date.now());
-  if (!active && viewerRole === "guest" && guestInvite) {
-    guestInvite = null;
+  if (viewerRole === "guest" && viewerGuestKind !== "permanent" && guestTempInvite && guestTempInvite.exp <= Date.now()) {
+    guestTempInvite = null;
     showGuestGone("expired");
     return;
   }
-  if (!active) guestInvite = null;
-  if (active) {
+  if (guestTempInvite && guestTempInvite.exp <= Date.now()) guestTempInvite = null;
+  if (guestTempInvite) {
     guestPicking = false;
     window.clearTimeout(guestPickTimer);
   }
   const guestView = viewerRole === "guest";
-  guestGenerate.classList.toggle("hidden", active || guestPicking || guestView);
+  const hasTemp = Boolean(guestTempInvite);
+  const hasPerm = Boolean(guestPermInvite);
+  guestGenerate.classList.toggle("hidden", guestView || guestPicking || hasTemp);
   guestHours.classList.toggle("hidden", !guestPicking || guestView);
-  guestClock.classList.toggle("hidden", !active);
-  guestCopy.classList.toggle("hidden", !active || guestView);
-  guestRevoke.classList.toggle("hidden", !active || guestView);
-  if (active) guestClock.textContent = guestRemainLabel(guestInvite.exp);
+  if (guestPermSlot) guestPermSlot.classList.toggle("hidden", !hasPerm || guestView);
+  if (guestTempSlot) guestTempSlot.classList.toggle("hidden", !hasTemp || guestView);
+  if (hasTemp && guestClock) guestClock.textContent = guestRemainLabel(guestTempInvite.exp);
 }
 
 async function loadGuestBar() {
   if (viewerRole !== "owner") return;
   try {
     const data = await api("/api/guest");
-    guestInvite = data.active ? data : null;
+    guestTempInvite = data.temporary?.active ? data.temporary : null;
+    guestPermInvite = data.permanent?.active ? data.permanent : null;
   } catch (error) {
     if (error.guestEnded) showGuestGone(error.guestEnd);
     return;
@@ -526,9 +535,12 @@ function showLogin() {
   stopAll();
   hideGuestGone();
   viewerRole = "owner";
-  guestInvite = null;
+  viewerGuestKind = "";
+  guestTempInvite = null;
+  guestPermInvite = null;
   guestPicking = false;
   window.clearTimeout(guestPickTimer);
+  window.clearTimeout(guestHoldTimer);
   document.body.dataset.guest = "";
   appView.classList.add("hidden");
   passwordView.classList.add("hidden");
@@ -689,8 +701,8 @@ function refreshGrid() {
   paintRail();
 }
 
-function paintAudience(holder, viewers, guests) {
-  const marks = audienceMarks(viewers, guests);
+function paintAudience(holder, viewers, guests, permanent = 0) {
+  const marks = audienceMarks(viewers, guests, permanent);
   holder.replaceChildren();
   if (!marks) {
     holder.classList.add("hidden");
@@ -714,7 +726,7 @@ function renderRail() {
     button.append(nameSpan);
     const pair = document.createElement("span");
     pair.className = "audience-pair";
-    paintAudience(pair, entry.viewers, entry.guests);
+    paintAudience(pair, entry.viewers, entry.guests, entry.permanent);
     if (!pair.classList.contains("hidden")) button.append(pair);
     if (peers.has(entry.name)) button.classList.add("on");
     if (entry.offline) button.classList.add("offline");
@@ -723,46 +735,58 @@ function renderRail() {
   }
 }
 
-const RAIL_KEY = "spartan-live-rail";
+const RAIL_KEY = "spartan-live-rail-pin";
 
-function storedRailOpen() {
-  try { return localStorage.getItem(RAIL_KEY) === "open"; } catch { return false; }
+function storedRailPinned() {
+  try { return localStorage.getItem(RAIL_KEY) === "pinned"; } catch { return false; }
 }
 
-let railState = { storedOpen: storedRailOpen(), held: false, peekUntil: 0 };
+let railState = createRailState(storedRailPinned());
 let railHadNames = false;
 
+function railForceOpen() {
+  return catalog.size > 0 && visibleCount() === 0;
+}
+
 function paintRail() {
-  const now = Date.now();
-  const open = visualRailOpen(railState, now);
-  const seconds = peekSecondsLeft(railState, now);
+  const open = visualRailOpen(railState, { forceOpen: railForceOpen() });
   railWrap.classList.toggle("is-open", open);
   rail.classList.toggle("hidden", !open);
   railToggle.setAttribute("aria-expanded", open ? "true" : "false");
   const label = railToggle.querySelector(".rail-label");
-  if (label) label.textContent = open ? "Ocultar" : "Lives";
+  if (label) {
+    if (!open) label.textContent = "Lives";
+    else label.textContent = railState.pinned ? "Desafixar menu" : "Fixar menu";
+  }
   const dot = railToggle.querySelector(".rail-dot");
   if (dot) {
     const anyone = [...catalog.values()].some((entry) => !entry.offline);
     dot.classList.toggle("is-on", anyone);
     dot.classList.toggle("is-off", !anyone);
   }
-  railCount.hidden = seconds <= 0;
-  railCount.textContent = seconds > 0 ? `${seconds}s` : "";
 }
 
 function rememberRail() {
-  try { localStorage.setItem(RAIL_KEY, railState.storedOpen ? "open" : "closed"); } catch { /* o navegador não guardou */ }
+  try { localStorage.setItem(RAIL_KEY, railState.pinned ? "pinned" : "auto"); } catch { /* o navegador não guardou */ }
 }
 
 railToggle.addEventListener("click", () => {
-  railState = railAfterToggle(railState, Date.now());
+  if (!visualRailOpen(railState, { forceOpen: railForceOpen() }) && !railForceOpen()) return;
+  railState = railAfterPinToggle(railState);
   rememberRail();
   paintRail();
 });
 
-function noteRailEnter(now) {
-  railState = railAfterEnter(railState, now);
+if (railWrap) {
+  railWrap.addEventListener("pointerenter", () => {
+    if (arrivalToastOpenNow()) return;
+    railState = railAfterHover(railState, true);
+    paintRail();
+  });
+  railWrap.addEventListener("pointerleave", () => {
+    railState = railAfterHover(railState, false);
+    paintRail();
+  });
 }
 
 function noteRailEmpty() {
@@ -772,24 +796,6 @@ function noteRailEmpty() {
   rememberRail();
 }
 
-function noteRailInteraction(event) {
-  if (arrivalToastOpenNow()) return;
-  if (event.target instanceof Element && event.target.closest("#rail-toggle")) return;
-  const next = railAfterInteract(railState, Date.now());
-  if (next === railState) return;
-  railState = next;
-  paintRail();
-}
-
-document.addEventListener("pointerdown", noteRailInteraction);
-document.addEventListener("keydown", noteRailInteraction);
-document.addEventListener("wheel", noteRailInteraction, { passive: true });
-window.setInterval(() => {
-  if (!railState.peekUntil) return;
-  const next = railAfterTick(railState, Date.now());
-  if (next !== railState) railState = next;
-  paintRail();
-}, 200);
 paintRail();
 
 function toggleWatch(name) {
@@ -1490,14 +1496,23 @@ async function refresh() {
     const switchingKinds = data.switchingKinds || {};
     const liveNames = data.streams.map((stream) => stream.name).filter((name) => !stopped.has(name));
     const presentNames = [...new Set([...liveNames, ...switching])];
-    const step = nextPresence(presence, presentNames, [...stopped], Date.now());
+    const now = Date.now();
+    if (viewerRole === "guest") {
+      for (const name of [...catalog.keys()]) {
+        if (!presentNames.includes(name)) {
+          catalog.delete(name);
+          dropWatched(name, now);
+        }
+      }
+    }
+    const step = nextPresence(presence, presentNames, [...stopped], now);
     const arrived = freshArrivals(step.enter, known);
     presence = { primed: step.primed, people: step.people };
-    const now = Date.now();
     const readyAt = new Map(data.streams.map((stream) => [stream.name, Date.parse(stream.readyTime || "")]));
     const thumbAt = new Map(data.streams.map((stream) => [stream.name, Number(stream.thumbAt) || 0]));
     const viewersMap = new Map(data.streams.map((stream) => [stream.name, Number(stream.viewers) || 0]));
     const guestsMap = new Map(data.streams.map((stream) => [stream.name, Number(stream.guests) || 0]));
+    const permanentMap = new Map(data.streams.map((stream) => [stream.name, Number(stream.permanent) || 0]));
     for (const name of stopped) {
       catalog.delete(name);
       dropWatched(name, now);
@@ -1506,12 +1521,13 @@ async function refresh() {
     const seen = new Set([...live, ...switching, ...catalog.keys()]);
     for (const name of seen) {
       if (stopped.has(name)) continue;
-      const current = catalog.get(name) || { name, offline: false, offlineAt: 0, switching: false, viewers: 0, guests: 0 };
+      const current = catalog.get(name) || { name, offline: false, offlineAt: 0, switching: false, viewers: 0, guests: 0, permanent: 0 };
       const previousReady = current.readyAt;
       if (Number.isFinite(readyAt.get(name))) current.readyAt = readyAt.get(name);
       if (thumbAt.get(name)) current.thumbAt = thumbAt.get(name);
       const viewers = viewersMap.get(name) || 0;
       const guests = guestsMap.get(name) || 0;
+      const permanent = permanentMap.get(name) || 0;
       const phase = screenPhase(current, live.has(name), switching.has(name), now, OFFLINE_WAIT_MS, previousReady);
       if (phase.action === "drop") {
         catalog.delete(name);
@@ -1521,10 +1537,11 @@ async function refresh() {
       if (!catalog.has(name) && !live.has(name) && !switching.has(name)) continue;
       phase.entry.viewers = viewers;
       phase.entry.guests = guests;
+      phase.entry.permanent = permanent;
       catalog.set(name, phase.entry);
       const peer = peers.get(name);
       if (Number.isFinite(phase.entry.readyAt) && peer) peer.readyAt = phase.entry.readyAt;
-      if (peer?.viewersBadge) paintAudience(peer.viewersBadge, viewers, guests);
+      if (peer?.viewersBadge) paintAudience(peer.viewersBadge, viewers, guests, permanent);
       const posterStamp = Number(phase.entry.thumbAt) || 0;
       if (peer?.poster && posterStamp && peer.posterStamp !== posterStamp) {
         peer.posterStamp = posterStamp;
@@ -1570,8 +1587,6 @@ async function refresh() {
       if (shouldUseArrivalToast({ theaterOn, fullscreenActive, railVisible: railCurrentlyVisible })) {
         toastState = enqueueArrivalToasts(toastState, newcomers, now);
         paintArrivalToast();
-      } else {
-        noteRailEnter(now);
       }
       if (visibleCount() === 0) advanceHappyGif();
     }
@@ -1870,37 +1885,9 @@ logoutButton.addEventListener("click", async () => {
   showLogin();
 });
 
-guestGenerate.addEventListener("click", () => {
-  guestPicking = true;
-  paintGuest();
-  window.clearTimeout(guestPickTimer);
-  guestPickTimer = window.setTimeout(() => {
-    if (!guestPicking) return;
-    guestPicking = false;
-    paintGuest();
-  }, 5000);
-});
-
-guestHours.addEventListener("click", async (event) => {
-  const button = event.target.closest("button");
-  const hours = Number(button?.dataset.hours);
-  if (!hours) return;
-  window.clearTimeout(guestPickTimer);
-  try {
-    guestInvite = await api("/api/guest", { method: "POST", body: JSON.stringify({ hours }) });
-    guestPicking = false;
-    paintGuest();
-  } catch (error) {
-    if (error.status === 409) {
-      guestPicking = false;
-      await loadGuestBar();
-    }
-  }
-});
-
-guestCopy.addEventListener("click", async () => {
-  if (!guestInvite?.path) return;
-  const url = new URL(guestInvite.path, location.origin).href;
+async function copyGuestPath(path, button) {
+  if (!path || !button) return;
+  const url = new URL(path, location.origin).href;
   try {
     await navigator.clipboard.writeText(url);
   } catch {
@@ -1911,16 +1898,93 @@ guestCopy.addEventListener("click", async () => {
     document.execCommand("copy");
     input.remove();
   }
-  guestCopy.textContent = "Copiado";
+  button.textContent = "Copiado";
   window.clearTimeout(guestCopyTimer);
   guestCopyTimer = window.setTimeout(() => {
-    guestCopy.textContent = "Copiar";
+    button.textContent = "Copiar";
   }, 2000);
+}
+
+function askRevoke(kind) {
+  guestRevokeKind = kind === "permanent" ? "permanent" : "temporary";
+  guestRevokeAsk.classList.remove("hidden");
+}
+
+function clearGuestHold() {
+  window.clearTimeout(guestHoldTimer);
+  guestHoldTimer = 0;
+}
+
+async function createPermanentInvite() {
+  clearGuestHold();
+  guestHoldDone = true;
+  if (guestPermInvite) return;
+  try {
+    const data = await api("/api/guest", { method: "POST", body: JSON.stringify({ permanent: true }) });
+    guestTempInvite = data.temporary?.active ? data.temporary : guestTempInvite;
+    guestPermInvite = data.permanent?.active ? data.permanent : null;
+    guestPicking = false;
+    window.clearTimeout(guestPickTimer);
+    paintGuest();
+  } catch (error) {
+    if (error.status === 409) await loadGuestBar();
+  }
+}
+
+guestGenerate.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0) return;
+  guestHoldDone = false;
+  clearGuestHold();
+  guestHoldTimer = window.setTimeout(() => {
+    createPermanentInvite();
+  }, PERMANENT_HOLD_MS);
 });
 
-guestRevoke.addEventListener("click", () => {
-  guestRevokeAsk.classList.remove("hidden");
+guestGenerate.addEventListener("pointerup", () => {
+  if (guestHoldDone) {
+    guestHoldDone = false;
+    return;
+  }
+  if (!guestHoldTimer) return;
+  clearGuestHold();
+  guestPicking = true;
+  paintGuest();
+  window.clearTimeout(guestPickTimer);
+  guestPickTimer = window.setTimeout(() => {
+    if (!guestPicking) return;
+    guestPicking = false;
+    paintGuest();
+  }, 5000);
 });
+
+guestGenerate.addEventListener("pointerleave", () => {
+  if (!guestHoldDone) clearGuestHold();
+});
+guestGenerate.addEventListener("pointercancel", clearGuestHold);
+
+guestHours.addEventListener("click", async (event) => {
+  const button = event.target.closest("button");
+  const hours = Number(button?.dataset.hours);
+  if (!hours) return;
+  window.clearTimeout(guestPickTimer);
+  try {
+    const data = await api("/api/guest", { method: "POST", body: JSON.stringify({ hours }) });
+    guestTempInvite = data.temporary?.active ? data.temporary : null;
+    guestPermInvite = data.permanent?.active ? data.permanent : guestPermInvite;
+    guestPicking = false;
+    paintGuest();
+  } catch (error) {
+    if (error.status === 409) {
+      guestPicking = false;
+      await loadGuestBar();
+    }
+  }
+});
+
+guestCopy.addEventListener("click", () => copyGuestPath(guestTempInvite?.path, guestCopy));
+guestPermCopy.addEventListener("click", () => copyGuestPath(guestPermInvite?.path, guestPermCopy));
+guestRevoke.addEventListener("click", () => askRevoke("temporary"));
+guestPermRevoke.addEventListener("click", () => askRevoke("permanent"));
 
 document.querySelector("#guest-revoke-cancel").addEventListener("click", () => {
   guestRevokeAsk.classList.add("hidden");
@@ -1932,15 +1996,19 @@ guestRevokeAsk.addEventListener("click", (event) => {
 
 document.querySelector("#guest-revoke-confirm").addEventListener("click", async () => {
   guestRevokeAsk.classList.add("hidden");
-  await api("/api/guest/revoke", { method: "POST", body: "{}" });
-  guestInvite = null;
+  const data = await api("/api/guest/revoke", {
+    method: "POST",
+    body: JSON.stringify({ kind: guestRevokeKind }),
+  });
+  guestTempInvite = data.temporary?.active ? data.temporary : null;
+  guestPermInvite = data.permanent?.active ? data.permanent : null;
   guestPicking = false;
   paintGuest();
 });
 
 const timer = window.setInterval(() => {
   if (!guestGone.classList.contains("hidden")) return;
-  if (guestInvite) paintGuest();
+  if (guestTempInvite || guestPermInvite) paintGuest();
   if (!appView.classList.contains("hidden")) {
     if (viewerRole === "owner") loadGuestBar();
     refresh();
@@ -1948,7 +2016,7 @@ const timer = window.setInterval(() => {
 }, 3000);
 
 const guestClockTimer = window.setInterval(() => {
-  if (guestInvite) paintGuest();
+  if (guestTempInvite || guestPermInvite) paintGuest();
 }, 1000);
 
 window.addEventListener("pagehide", () => {
@@ -1956,6 +2024,7 @@ window.addEventListener("pagehide", () => {
   window.clearInterval(guestClockTimer);
   window.clearInterval(guestGoneTimer);
   window.clearTimeout(guestPickTimer);
+  clearGuestHold();
 });
 
 api("/api/me")
@@ -1965,8 +2034,12 @@ api("/api/me")
       return;
     }
     viewerRole = me.role === "guest" ? "guest" : "owner";
+    viewerGuestKind = me.kind || "";
     document.body.dataset.guest = viewerRole === "guest" ? "1" : "";
-    if (viewerRole === "guest" && Number(me.exp) > Date.now()) guestInvite = { exp: me.exp };
+    if (viewerRole === "guest" && Number(me.exp) > Date.now()) {
+      if (viewerGuestKind === "permanent") guestPermInvite = { exp: me.exp };
+      else guestTempInvite = { exp: me.exp };
+    }
     showApp();
     paintGuest();
     if (viewerRole === "owner") return loadGuestBar().then(() => refresh());

@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createGuest, guestActive, guestEndMessage, guestHours, guestRemainLabel } from "./public/guest-link.mjs";
+import {
+  createGuest,
+  createPermanentGuest,
+  findGuestInvite,
+  guestActive,
+  guestEndMessage,
+  guestHours,
+  guestRemainLabel,
+  normalizeGuestStore,
+  PERMANENT_HOLD_MS,
+} from "./public/guest-link.mjs";
 
 test("o convite só aceita 3, 6, 12 ou 24 horas e o endereço não se repete", () => {
   assert.equal(guestHours(12), 12);
@@ -25,4 +35,22 @@ test("convite vencido some e o relógio mostra o que falta", () => {
   assert.equal(guestEndMessage("revoked"), "Esse convite foi revogado. O link não está mais disponível.");
   assert.equal(guestEndMessage("expired"), "O tempo desse convite acabou. O link não está mais disponível.");
   assert.equal(guestEndMessage(""), "Esse link não existe mais.");
+});
+
+test("link permanente fica até revogar e convive com o temporário", () => {
+  assert.equal(PERMANENT_HOLD_MS, 10_000);
+  const permanent = createPermanentGuest("dddddddddddddddd", 1_000);
+  assert.equal(permanent.kind, "permanent");
+  assert.ok(permanent.exp > 1_000);
+  const store = normalizeGuestStore({
+    temporary: createGuest(3, 1_000, "eeeeeeeeeeeeeeee"),
+    permanent,
+  }, 2_000);
+  assert.equal(store.temporary.id, "eeeeeeeeeeeeeeee");
+  assert.equal(store.permanent.id, "dddddddddddddddd");
+  assert.equal(findGuestInvite(store, "dddddddddddddddd", 2_000).kind, "permanent");
+  assert.equal(findGuestInvite(store, "eeeeeeeeeeeeeeee", 2_000).kind, "temporary");
+  const legacy = normalizeGuestStore(createGuest(6, 1_000, "ffffffffffffffff"), 2_000);
+  assert.equal(legacy.temporary.id, "ffffffffffffffff");
+  assert.equal(legacy.permanent, null);
 });

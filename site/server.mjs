@@ -6,7 +6,14 @@ import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { loadPassword, savePassword, verifyPassword } from "./password.mjs";
 import { countViewers, dropViewer, touchViewer, SAD_GIFS } from "./public/theater.mjs";
-import { createGuest, guestActive, guestEndMessage } from "./public/guest-link.mjs";
+import {
+  createGuest,
+  createPermanentGuest,
+  findGuestInvite,
+  guestEndMessage,
+  normalizeGuestStore,
+  PERMANENT_SESSION_MS,
+} from "./public/guest-link.mjs";
 
 const PORT = Number(process.env.PORT || 8080);
 const VIEWER_USER = process.env.VIEWER_USER || "";
@@ -41,6 +48,8 @@ const stoppedUntil = new Map();
 const switchingUntil = new Map();
 const viewersByStream = new Map();
 const guestsByStream = new Map();
+const permanentGuestsByStream = new Map();
+const shareByStream = new Map();
 let passwordRecord = null;
 
 function viewerRecord() {
@@ -48,35 +57,33 @@ function viewerRecord() {
   return passwordRecord;
 }
 
-function loadGuest(now = Date.now()) {
+function loadGuestStore(now = Date.now()) {
   try {
-    return guestActive(JSON.parse(fs.readFileSync(GUEST_FILE, "utf8")), now);
+    return normalizeGuestStore(JSON.parse(fs.readFileSync(GUEST_FILE, "utf8")), now);
   } catch {
-    return null;
+    return { temporary: null, permanent: null };
   }
 }
 
-function saveGuest(record) {
+function saveGuestStore(store) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   const temp = `${GUEST_FILE}.tmp`;
-  fs.writeFileSync(temp, JSON.stringify(record), { mode: 0o600 });
+  const clean = {
+    temporary: store?.temporary || null,
+    permanent: store?.permanent || null,
+  };
+  fs.writeFileSync(temp, JSON.stringify(clean), { mode: 0o600 });
   fs.renameSync(temp, GUEST_FILE);
-}
-
-function clearGuest() {
-  try {
-    fs.unlinkSync(GUEST_FILE);
-  } catch {
-    /* o convite já não estava no disco */
-  }
 }
 
 function openSession(req, now = Date.now()) {
   const data = readSession(cookies(req)[COOKIE], now);
   if (!data) return { session: null, guestEnded: false, guestEnd: "" };
   if (data.role !== "guest") return { session: data, guestEnded: false, guestEnd: "" };
-  const invite = loadGuest(now);
-  if (invite && invite.id === data.gid && data.exp >= now) return { session: data, guestEnded: false, guestEnd: "" };
+  const found = findGuestInvite(loadGuestStore(now), data.gid, now);
+  if (found && data.exp >= now) {
+    return { session: { ...data, kind: found.kind }, guestEnded: false, guestEnd: "" };
+  }
   return { session: null, guestEnded: true, guestEnd: data.exp < now ? "expired" : "revoked" };
 }
 
@@ -116,9 +123,37 @@ function sendGuestGone(res, reason = "") {
   res.end(html);
 }
 
-function guestPayload(invite) {
-  if (!invite) return { active: false };
-  return { active: true, exp: invite.exp, hours: invite.hours, path: `/v/${invite.id}` };
+function guestTempPayload(invite) {
+  if (!invite) return null;
+  return { active: true, kind: "temporary", exp: invite.exp, hours: invite.hours, path: `/v/${invite.id}` };
+}
+
+function guestPermPayload(invite) {
+  if (!invite) return null;
+  return { active: true, kind: "permanent", path: `/v/${invite.id}` };
+}
+
+function guestBarPayload(store) {
+  return {
+    temporary: guestTempPayload(store?.temporary || null),
+    permanent: guestPermPayload(store?.permanent || null),
+  };
+}
+
+function shareFlags(name) {
+  const mark = shareByStream.get(name);
+  if (!mark) return { guestsTemp: false, guestsPerm: false };
+  return {
+    guestsTemp: Boolean(mark.guestsTemp),
+    guestsPerm: Boolean(mark.guestsPerm),
+  };
+}
+
+function guestMaySee(session, name) {
+  if (!session || session.role !== "guest") return true;
+  const flags = shareFlags(name);
+  if (session.kind === "permanent") return flags.guestsPerm;
+  return flags.guestsTemp;
 }
 
 function publisherAllowed(body) {
@@ -170,6 +205,7 @@ export function signSession(user, now = Date.now(), extra = null) {
   if (extra && typeof extra === "object") {
     if (extra.role) payload.role = extra.role;
     if (extra.gid) payload.gid = extra.gid;
+    if (extra.kind) payload.kind = extra.kind;
     if (typeof extra.exp === "number") payload.exp = extra.exp;
   }
   const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
@@ -257,8 +293,8 @@ function clientIp(req) {
   return remote || "local";
 }
 
-function watcherKey(req, guest) {
-  const who = guest ? "g" : "o";
+function watcherKey(req, guest, kind = "") {
+  const who = guest ? (kind === "permanent" ? "gp" : "g") : "o";
   const agent = String(req.headers["user-agent"] || "").slice(0, 64);
   return `${who}|${clientIp(req)}|${agent}`;
 }
@@ -694,7 +730,24 @@ async function handle(req, res) {
       ok: true,
       viewers: countViewers(viewersByStream, name),
       guests: countViewers(guestsByStream, name),
+      permanent: countViewers(permanentGuestsByStream, name),
     });
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/share") {
+    const body = await readJson(req);
+    const name = String(body.name || "");
+    if (!publisherAllowed(body) || !safeStreamName(name)) {
+      sendJson(res, 401, { error: "nao autorizado" });
+      return;
+    }
+    shareByStream.set(name, {
+      guestsTemp: Boolean(body.guestsTemp),
+      guestsPerm: Boolean(body.guestsPerm),
+      at: Date.now(),
+    });
+    sendJson(res, 200, { ok: true });
     return;
   }
 
@@ -705,8 +758,8 @@ async function handle(req, res) {
 
   if (req.method === "GET" && pathname.startsWith("/v/")) {
     const id = pathname.slice("/v/".length);
-    const invite = /^[\w-]{16,64}$/.test(id) ? loadGuest() : null;
-    if (!invite || invite.id !== id) {
+    const found = /^[\w-]{16,64}$/.test(id) ? findGuestInvite(loadGuestStore(), id) : null;
+    if (!found) {
       const data = readSession(cookies(req)[COOKIE]);
       const reason = data?.role === "guest" && data.gid === id
         ? (data.exp < Date.now() ? "expired" : "revoked")
@@ -714,12 +767,16 @@ async function handle(req, res) {
       sendGuestGone(res, reason);
       return;
     }
+    const invite = found.invite;
     const token = signSession(VIEWER_USER || "spartan", Date.now(), {
       role: "guest",
       gid: invite.id,
+      kind: found.kind,
       exp: invite.exp,
     });
-    const left = Math.max(1, Math.ceil((invite.exp - Date.now()) / 1000)) + 24 * 60 * 60;
+    const left = found.kind === "permanent"
+      ? Math.floor(PERMANENT_SESSION_MS / 1000)
+      : Math.max(1, Math.ceil((invite.exp - Date.now()) / 1000)) + 24 * 60 * 60;
     res.writeHead(302, {
       Location: "/",
       "set-cookie": cookieHeader(token, req, false, left),
@@ -764,6 +821,7 @@ async function handle(req, res) {
     sendJson(res, 200, {
       user: session.u,
       role: guest ? "guest" : "owner",
+      kind: guest ? (session.kind || "temporary") : "",
       mustChange: guest ? false : Boolean(viewerRecord().mustChange),
       exp: guest ? session.exp : 0,
     });
@@ -777,27 +835,53 @@ async function handle(req, res) {
       return;
     }
     if (req.method === "GET" && pathname === "/api/guest") {
-      sendJson(res, 200, guestPayload(loadGuest()));
+      sendJson(res, 200, guestBarPayload(loadGuestStore()));
       return;
     }
     if (req.method === "POST" && pathname === "/api/guest/revoke") {
-      clearGuest();
-      sendJson(res, 200, { active: false });
+      const body = await readJson(req);
+      const kind = body.kind === "permanent" ? "permanent" : "temporary";
+      const store = loadGuestStore();
+      store[kind] = null;
+      if (!store.temporary && !store.permanent) {
+        try { fs.unlinkSync(GUEST_FILE); } catch { /* já não estava */ }
+      } else {
+        saveGuestStore(store);
+      }
+      sendJson(res, 200, guestBarPayload(store));
       return;
     }
     if (req.method === "POST" && pathname === "/api/guest") {
-      if (loadGuest()) {
+      const body = await readJson(req);
+      const store = loadGuestStore();
+      const token = crypto.randomBytes(18).toString("base64url");
+      if (body.permanent) {
+        if (store.permanent) {
+          sendJson(res, 409, { error: "ja existe um link permanente" });
+          return;
+        }
+        const record = createPermanentGuest(token, Date.now());
+        if (!record) {
+          sendJson(res, 400, { error: "convite invalido" });
+          return;
+        }
+        store.permanent = record;
+        saveGuestStore(store);
+        sendJson(res, 200, guestBarPayload(store));
+        return;
+      }
+      if (store.temporary) {
         sendJson(res, 409, { error: "ja existe um link" });
         return;
       }
-      const body = await readJson(req);
-      const record = createGuest(body.hours, Date.now(), crypto.randomBytes(18).toString("base64url"));
+      const record = createGuest(body.hours, Date.now(), token);
       if (!record) {
         sendJson(res, 400, { error: "prazo invalido" });
         return;
       }
-      saveGuest(record);
-      sendJson(res, 200, guestPayload(record));
+      store.temporary = record;
+      saveGuestStore(store);
+      sendJson(res, 200, guestBarPayload(store));
       return;
     }
     sendJson(res, 405, { error: "metodo invalido" });
@@ -813,12 +897,15 @@ async function handle(req, res) {
     if (needsLogin()) return;
     const body = await readJson(req);
     const names = Array.isArray(body.names) ? body.names : [];
-    const viewerKey = watcherKey(req, guest);
+    const kind = guest ? (session.kind || "temporary") : "";
+    const viewerKey = watcherKey(req, guest, kind);
     const now = Date.now();
-    const book = guest ? guestsByStream : viewersByStream;
+    const book = !guest
+      ? viewersByStream
+      : (kind === "permanent" ? permanentGuestsByStream : guestsByStream);
     for (const raw of names) {
       const name = String(raw || "");
-      if (safeStreamName(name)) touchViewer(book, name, viewerKey, now);
+      if (safeStreamName(name) && guestMaySee(session, name)) touchViewer(book, name, viewerKey, now);
     }
     sendJson(res, 200, { ok: true });
     return;
@@ -829,9 +916,11 @@ async function handle(req, res) {
     const body = await readJson(req);
     const name = String(body.name || "");
     if (safeStreamName(name)) {
-      const viewerKey = watcherKey(req, guest);
+      const kind = guest ? (session.kind || "temporary") : "";
+      const viewerKey = watcherKey(req, guest, kind);
       dropViewer(viewersByStream, name, viewerKey);
       dropViewer(guestsByStream, name, viewerKey);
+      dropViewer(permanentGuestsByStream, name, viewerKey);
     }
     sendJson(res, 200, { ok: true });
     return;
@@ -843,13 +932,16 @@ async function handle(req, res) {
     const stopped = currentStopped(live);
     const gone = new Set(stopped);
     const now = Date.now();
-    const streams = live.filter((stream) => !gone.has(stream.name)).map((stream) => ({
-      ...stream,
-      thumbAt: thumbStamp(stream.name),
-      viewers: countViewers(viewersByStream, stream.name, now),
-      guests: countViewers(guestsByStream, stream.name, now),
-    }));
-    const switching = collectSwitching(switchingUntil, streams);
+    const streams = live
+      .filter((stream) => !gone.has(stream.name) && guestMaySee(session, stream.name))
+      .map((stream) => ({
+        ...stream,
+        thumbAt: thumbStamp(stream.name),
+        viewers: countViewers(viewersByStream, stream.name, now),
+        guests: countViewers(guestsByStream, stream.name, now),
+        permanent: countViewers(permanentGuestsByStream, stream.name, now),
+      }));
+    const switching = collectSwitching(switchingUntil, streams).filter((name) => guestMaySee(session, name));
     const switchingKinds = collectSwitchKinds(switchingUntil);
     sweepThumbs(streams.map((stream) => stream.name), switching);
     sendJson(res, 200, { streams, stopped, switching, switchingKinds });
@@ -863,6 +955,10 @@ async function handle(req, res) {
     const rest = pieces.slice(2).join("/");
     if (!safeStreamName(name) || !safeHlsRest(rest)) {
       sendJson(res, 400, { error: "caminho invalido" });
+      return;
+    }
+    if (!guestMaySee(session, name)) {
+      sendJson(res, 404, { error: "live indisponivel" });
       return;
     }
     await proxyHls(req, res, name, rest, safeHlsSearch(url.search));

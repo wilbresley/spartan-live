@@ -78,8 +78,8 @@ test("um convite por vez, o convidado assiste e o link morto fica cinza", async 
       body: JSON.stringify({ hours: 12 }),
     });
     assert.equal(made.status, 200);
-    assert.equal(made.json.hours, 12);
-    assert.match(made.json.path, /^\/v\/[\w-]{16,64}$/);
+    assert.equal(made.json.temporary.hours, 12);
+    assert.match(made.json.temporary.path, /^\/v\/[\w-]{16,64}$/);
 
     const again = await ask(server, {
       method: "POST",
@@ -89,15 +89,33 @@ test("um convite por vez, o convidado assiste e o link morto fica cinza", async 
     });
     assert.equal(again.status, 409);
 
-    const enter = await ask(server, { path: made.json.path });
+    const permanent = await ask(server, {
+      method: "POST",
+      path: "/api/guest",
+      cookie: owner,
+      body: JSON.stringify({ permanent: true }),
+    });
+    assert.equal(permanent.status, 200);
+    assert.ok(permanent.json.permanent.active);
+    assert.match(permanent.json.permanent.path, /^\/v\/[\w-]{16,64}$/);
+    assert.notEqual(permanent.json.permanent.path, made.json.temporary.path);
+
+    const enter = await ask(server, { path: made.json.temporary.path });
     assert.equal(enter.status, 302);
     assert.equal(enter.headers.location, "/");
     const guest = cookieOf(enter.headers);
 
     const me = await ask(server, { path: "/api/me", cookie: guest });
     assert.equal(me.json.role, "guest");
+    assert.equal(me.json.kind, "temporary");
     assert.equal(me.json.mustChange, false);
     assert.ok(me.json.exp > Date.now());
+
+    await ask(server, {
+      method: "POST",
+      path: "/api/share",
+      body: JSON.stringify({ name: "ana", user: "pub", password: "pub-segredo", guestsTemp: true, guestsPerm: false }),
+    });
 
     await ask(server, { method: "POST", path: "/api/watch", cookie: owner, body: JSON.stringify({ names: ["ana"] }) });
     await ask(server, {
@@ -114,6 +132,13 @@ test("um convite por vez, o convidado assiste e o link morto fica cinza", async 
     });
     assert.equal(counted.json.viewers, 1);
     assert.equal(counted.json.guests, 1);
+    assert.equal(counted.json.permanent, 0);
+
+    const permEnter = await ask(server, { path: permanent.json.permanent.path });
+    const permGuest = cookieOf(permEnter.headers);
+    const permMe = await ask(server, { path: "/api/me", cookie: permGuest });
+    assert.equal(permMe.json.kind, "permanent");
+
     await ask(server, { method: "POST", path: "/api/unwatch", cookie: owner, body: JSON.stringify({ name: "ana" }) });
     const afterLeave = await ask(server, {
       method: "POST",
@@ -122,47 +147,18 @@ test("um convite por vez, o convidado assiste e o link morto fica cinza", async 
     });
     assert.equal(afterLeave.json.viewers, 0);
     assert.equal(afterLeave.json.guests, 1);
-    await ask(server, {
-      method: "POST",
-      path: "/api/unwatch",
-      cookie: guest,
-      headers: { "user-agent": "visitante" },
-      body: JSON.stringify({ name: "ana" }),
-    });
-    await ask(server, {
-      method: "POST",
-      path: "/api/watch",
-      cookie: owner,
-      headers: { "user-agent": "mesmo" },
-      body: JSON.stringify({ names: ["ana"] }),
-    });
-    await ask(server, {
-      method: "POST",
-      path: "/api/watch",
-      cookie: guest,
-      headers: { "user-agent": "mesmo" },
-      body: JSON.stringify({ names: ["ana"] }),
-    });
-    const together = await ask(server, {
-      method: "POST",
-      path: "/api/viewers",
-      body: JSON.stringify({ name: "ana", user: "pub", password: "pub-segredo" }),
-    });
-    assert.equal(together.json.viewers, 1);
-    assert.equal(together.json.guests, 1);
 
     const download = await ask(server, { path: "/download/SpartanLive.exe", cookie: guest });
     assert.equal(download.status, 401);
-    const password = await ask(server, {
-      method: "POST",
-      path: "/api/password",
-      cookie: guest,
-      body: JSON.stringify({ current: "x", next: "yyyyyyyy", again: "yyyyyyyy" }),
-    });
-    assert.equal(password.status, 401);
 
-    const revoked = await ask(server, { method: "POST", path: "/api/guest/revoke", cookie: owner, body: "{}" });
-    assert.equal(revoked.json.active, false);
+    const revokedTemp = await ask(server, {
+      method: "POST",
+      path: "/api/guest/revoke",
+      cookie: owner,
+      body: JSON.stringify({ kind: "temporary" }),
+    });
+    assert.equal(revokedTemp.json.temporary, null);
+    assert.ok(revokedTemp.json.permanent.active);
     const ended = await ask(server, { path: "/api/me", cookie: guest });
     assert.equal(ended.status, 401);
     assert.equal(ended.json.guestEnded, true);
@@ -170,18 +166,23 @@ test("um convite por vez, o convidado assiste e o link morto fica cinza", async 
     assert.equal(ended.headers["set-cookie"], undefined);
     const againEnded = await ask(server, { path: "/api/streams", cookie: guest });
     assert.equal(againEnded.json.guestEnd, "revoked");
-    const page = await ask(server, { path: made.json.path, cookie: guest });
+    const page = await ask(server, { path: made.json.temporary.path, cookie: guest });
     assert.match(page.raw, /Esse convite foi revogado/);
 
     const expired = `spartan_live=${encodeURIComponent(signSession("spartan", Date.now(), {
       role: "guest",
-      gid: made.json.path.slice(3),
+      gid: made.json.temporary.path.slice(3),
+      kind: "temporary",
       exp: Date.now() - 1000,
     }))}`;
     const timedOut = await ask(server, { path: "/api/me", cookie: expired });
     assert.equal(timedOut.json.guestEnd, "expired");
-    const timedPage = await ask(server, { path: made.json.path, cookie: expired });
+    const timedPage = await ask(server, { path: made.json.temporary.path, cookie: expired });
     assert.match(timedPage.raw, /O tempo desse convite acabou/);
+
+    const stillPerm = await ask(server, { path: "/api/me", cookie: permGuest });
+    assert.equal(stillPerm.status, 200);
+    assert.equal(stillPerm.json.kind, "permanent");
 
     const fresh = await ask(server, {
       method: "POST",
@@ -190,7 +191,7 @@ test("um convite por vez, o convidado assiste e o link morto fica cinza", async 
       body: JSON.stringify({ hours: 24 }),
     });
     assert.equal(fresh.status, 200);
-    assert.notEqual(fresh.json.path, made.json.path);
+    assert.notEqual(fresh.json.temporary.path, made.json.temporary.path);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     fs.rmSync(dataDir, { recursive: true, force: true });

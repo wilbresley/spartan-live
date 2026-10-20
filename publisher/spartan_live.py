@@ -171,7 +171,7 @@ def looks_like_ip(host):
 
 def notify_targets(host, action):
     text = clean_host(host, "")
-    if action not in ("stop", "claim", "switch", "thumb", "viewers") or not text:
+    if action not in ("stop", "claim", "switch", "thumb", "viewers", "share") or not text:
         return []
     local = f"http://{text}:8097/api/{action}"
     if looks_like_ip(text):
@@ -353,21 +353,27 @@ def audience_counts(body):
             return 0
 
     if not isinstance(body, dict):
-        return 0, 0
-    return clean(body.get("viewers")), clean(body.get("guests"))
+        return 0, 0, 0
+    return clean(body.get("viewers")), clean(body.get("guests")), clean(body.get("permanent"))
 
 
-def audience_status(viewers, guests):
-    account, temporary = audience_counts({"viewers": viewers, "guests": guests})
-    if account <= 0 and temporary <= 0:
+def audience_status(viewers, guests, permanent=0):
+    account, temporary, forever = audience_counts({
+        "viewers": viewers, "guests": guests, "permanent": permanent,
+    })
+    if account <= 0 and temporary <= 0 and forever <= 0:
         return []
-    return [f"👁 {account} assistindo", f"⏳ {temporary} pelo link"]
+    return [
+        f"👁 {account} assistindo",
+        f"⏳ {temporary} pelo link",
+        f"∞ {forever} permanente",
+    ]
 
 
 def fetch_viewers(host, nick, user, password):
     targets = notify_targets(host, "viewers")
     if not targets or not nick or not user or not password:
-        return 0, 0
+        return 0, 0, 0
     payload = json.dumps({"name": nick, "user": user, "password": password}).encode("utf-8")
     for url in targets:
         request = urllib.request.Request(
@@ -382,7 +388,34 @@ def fetch_viewers(host, nick, user, password):
             return audience_counts(body)
         except Exception:
             continue
-    return 0, 0
+    return 0, 0, 0
+
+
+def post_share(host, nick, user, password, guests_temp, guests_perm):
+    targets = notify_targets(host, "share")
+    if not targets or not nick or not user or not password:
+        return False
+    payload = json.dumps({
+        "name": nick,
+        "user": user,
+        "password": password,
+        "guestsTemp": bool(guests_temp),
+        "guestsPerm": bool(guests_perm),
+    }).encode("utf-8")
+    for url in targets:
+        request = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=3) as response:
+                if 200 <= response.status < 300:
+                    return True
+        except Exception:
+            continue
+    return False
 
 
 class _JobBasicLimit(ctypes.Structure):
@@ -4518,6 +4551,7 @@ class App(QWidget):
         self._slow_streak = 0
         self._viewers_count = 0
         self._guests_count = 0
+        self._permanent_count = 0
         self._last_viewer_poll = 0.0
         self._hotkeys_installed = False
         self._window_feeder = None
@@ -5053,7 +5087,13 @@ class App(QWidget):
         if self.monitor_index.get() >= len(self.monitors):
             self.monitor_index.set(0)
 
-        self._field("Apelido", self.nick)
+        self._field(
+            "Apelido",
+            self.nick,
+            hint="Até 24 caracteres. Use letras, números, _ e -.",
+            max_len=24,
+            allow="nick",
+        )
         self._field("Servidor", self.host)
 
         self.monitor_labels = [monitor_label(i, monitor) for i, monitor in enumerate(self.monitors)] or ["Tela 1"]
@@ -5179,10 +5219,7 @@ class App(QWidget):
         self._content_layout.addWidget(self.status)
 
         self.start_with_windows = _QtVar(read_startup_enabled())
-        self.windows_check = _CheckProxy("Abrir com o Windows, sem iniciar a live", self.content)
-        self.windows_check.setFont(QFont("Segoe UI", 10))
-        self.windows_check.setChecked(bool(self.start_with_windows.get()))
-        self.windows_check.setStyleSheet(
+        check_style = (
             f"""
             QCheckBox {{ color: {self.fg}; spacing: 8px; }}
             QCheckBox::indicator {{
@@ -5194,6 +5231,10 @@ class App(QWidget):
             }}
             """
         )
+        self.windows_check = _CheckProxy("Abrir com o Windows, sem iniciar a live", self.content)
+        self.windows_check.setFont(QFont("Segoe UI", 10))
+        self.windows_check.setChecked(bool(self.start_with_windows.get()))
+        self.windows_check.setStyleSheet(check_style)
 
         def _on_chk(state):
             self.start_with_windows._value = bool(state)
@@ -5201,6 +5242,22 @@ class App(QWidget):
 
         self.windows_check.toggled.connect(_on_chk)
         self._content_layout.addWidget(self.windows_check)
+
+        self.share_temp = False
+        self.share_perm = False
+        self.share_temp_check = _CheckProxy("Compartilhar com convidados temporários", self.content)
+        self.share_temp_check.setFont(QFont("Segoe UI", 10))
+        self.share_temp_check.setChecked(False)
+        self.share_temp_check.setStyleSheet(check_style)
+        self.share_temp_check.toggled.connect(lambda state: self._share_toggled("temp", state))
+        self._content_layout.addWidget(self.share_temp_check)
+
+        self.share_perm_check = _CheckProxy("Compartilhar com convidados permanentes", self.content)
+        self.share_perm_check.setFont(QFont("Segoe UI", 10))
+        self.share_perm_check.setChecked(False)
+        self.share_perm_check.setStyleSheet(check_style)
+        self.share_perm_check.toggled.connect(lambda state: self._share_toggled("perm", state))
+        self._content_layout.addWidget(self.share_perm_check)
 
         self._content_layout.addStretch(1)
 
@@ -5238,7 +5295,7 @@ class App(QWidget):
         )
         self.content.resize(target_w, target_h)
 
-    def _field(self, label, variable):
+    def _field(self, label, variable, hint="", max_len=0, allow=""):
         box = QWidget(self.content)
         vbox = QVBoxLayout(box)
         vbox.setContentsMargins(0, 0, 0, 0)
@@ -5250,6 +5307,8 @@ class App(QWidget):
         entry = QLineEdit(str(variable.get() or ""), box)
         entry.setFont(QFont("Segoe UI", 11))
         entry.setFixedHeight(36)
+        if max_len > 0:
+            entry.setMaxLength(int(max_len))
         entry.setStyleSheet(
             f"""
             QLineEdit {{
@@ -5261,10 +5320,31 @@ class App(QWidget):
             }}
             """
         )
-        entry.textChanged.connect(lambda txt: setattr(variable, "_value", txt))
+
+        def _apply_text(txt):
+            text = str(txt or "")
+            if allow == "nick":
+                text = "".join(ch for ch in text if ch.isalnum() or ch in "_-")
+                if max_len > 0:
+                    text = text[:int(max_len)]
+                if text != entry.text():
+                    cursor = entry.cursorPosition()
+                    entry.blockSignals(True)
+                    entry.setText(text)
+                    entry.setCursorPosition(min(cursor, len(text)))
+                    entry.blockSignals(False)
+            variable._value = text
+
+        entry.textChanged.connect(_apply_text)
         variable._sync_fn = entry.text
         variable.trace_add("write", lambda: entry.setText(str(variable._value or "")) if entry.text() != str(variable._value or "") else None)
         vbox.addWidget(entry)
+        if hint:
+            tip = QLabel(hint, box)
+            tip.setFont(QFont("Segoe UI", 8))
+            tip.setWordWrap(True)
+            tip.setStyleSheet(f"color: {self.muted};")
+            vbox.addWidget(tip)
         self._content_layout.addWidget(box)
 
     def _choice(self, label, variable, labels, volume_var=None, volume_cmd=None, before_open=None, refresh_cmd=None, targets_provider=None, sound_provider=None):
@@ -5441,13 +5521,37 @@ class App(QWidget):
         if not base or not self.running:
             return base
         parts = [base]
-        if self._viewers_count > 0 or self._guests_count > 0:
-            parts.extend(audience_status(self._viewers_count, self._guests_count))
+        if self._viewers_count > 0 or self._guests_count > 0 or self._permanent_count > 0:
+            parts.extend(audience_status(self._viewers_count, self._guests_count, self._permanent_count))
         if self._mic_muted and self.selected_mic():
             parts.append("Mic mudo")
         if self._slow_net:
             parts.append("Internet ou PC sofrendo — tente 720p 30 ou 480p 30")
         return " · ".join(parts)
+
+    def _share_toggled(self, kind, state):
+        if kind == "perm":
+            self.share_perm = bool(state)
+        else:
+            self.share_temp = bool(state)
+        self._push_share()
+
+    def _push_share(self):
+        if not self.running or self.stopping:
+            return
+        nick = self.live_nick
+        host = self.live_host
+        user = str(self.publish.get("user") or "")
+        password = str(self.publish.get("password") or "")
+        if not (nick and host and user and password):
+            return
+        temp = bool(self.share_temp)
+        perm = bool(self.share_perm)
+        threading.Thread(
+            target=post_share,
+            args=(host, nick, user, password, temp, perm),
+            daemon=True,
+        ).start()
 
     def _refresh_live_status(self):
         if not self.running or not self._base_status:
@@ -5491,12 +5595,18 @@ class App(QWidget):
                     ).start()
 
     def _poll_viewers_worker(self, host, nick, user, password):
-        viewers, guests = fetch_viewers(host, nick, user, password)
+        post_share(host, nick, user, password, bool(self.share_temp), bool(self.share_perm))
+        viewers, guests, permanent = fetch_viewers(host, nick, user, password)
         if not self.running or self.stopping or self.live_nick != nick:
             return
-        if viewers != self._viewers_count or guests != self._guests_count:
+        if (
+            viewers != self._viewers_count
+            or guests != self._guests_count
+            or permanent != self._permanent_count
+        ):
             self._viewers_count = viewers
             self._guests_count = guests
+            self._permanent_count = permanent
             self.after(0, self._refresh_live_status)
 
     def _current_window_geom(self):
@@ -6350,6 +6460,7 @@ class App(QWidget):
         self.button.config(text="Parar")
         self._refresh_live_status()
         self._paint_presence(True)
+        self._push_share()
         self._send_thumb()
 
     def _send_thumb(self):
@@ -6482,6 +6593,7 @@ class App(QWidget):
         self._slow_streak = 0
         self._viewers_count = 0
         self._guests_count = 0
+        self._permanent_count = 0
         self._signal_stop()
         self.stopping = True
         self.running = False

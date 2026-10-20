@@ -129,10 +129,12 @@ test("balão de chegada entra em fila de 5s sem encavalar e pausa com o mouse em
   assert.deepEqual(queue.queue, []);
 });
 
-test("olho conta a conta logada e a ampulheta conta o link temporário", () => {
+test("olho conta a conta logada, ampulheta o temporário e infinito o permanente", () => {
   assert.equal(audienceMarks(2, 0), "👁 2");
   assert.equal(audienceMarks(0, 3), "⏳ 3");
   assert.equal(audienceMarks(1, 4), "👁 1  ⏳ 4");
+  assert.equal(audienceMarks(1, 2, 3), "👁 1  ⏳ 2  ∞ 3");
+  assert.equal(audienceMarks(0, 0, 2), "∞ 2");
   assert.equal(audienceMarks(0, 0), "");
 });
 

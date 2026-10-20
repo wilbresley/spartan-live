@@ -54,9 +54,16 @@
             <button type="button" data-hours="12">12h</button>
             <button type="button" data-hours="24">24h</button>
           </div>
-          <span id="guest-clock" class="hidden" role="status"></span>
-          <button id="guest-copy" type="button" class="hidden">Copiar</button>
-          <button id="guest-revoke" type="button" class="hidden">Revogar</button>
+          <div id="guest-permanent" class="guest-slot hidden">
+            <span class="guest-tag">Permanente</span>
+            <button id="guest-perm-copy" type="button">Copiar</button>
+            <button id="guest-perm-revoke" type="button">Revogar</button>
+          </div>
+          <div id="guest-temporary" class="guest-slot hidden">
+            <span id="guest-clock" role="status"></span>
+            <button id="guest-copy" type="button">Copiar</button>
+            <button id="guest-revoke" type="button">Revogar</button>
+          </div>
         </div>
         <button id="theater-toggle" type="button" title="Modo Teatro (T)" aria-label="Modo Teatro">▭</button>
         <button id="grid-fullscreen" type="button" title="Tela cheia do grid" aria-label="Tela cheia do grid">⛶</button>
@@ -82,7 +89,6 @@
       <aside id="rail-wrap">
         <div class="rail-head">
           <button id="rail-toggle" type="button" aria-expanded="false"><span class="rail-label">Lives</span><span class="rail-dot is-off"></span></button>
-          <span id="rail-count" class="rail-count" hidden>10s</span>
         </div>
         <p id="rail-joke" class="rail-joke">Cade a Live?</p>
         <nav id="live-rail" class="hidden"></nav>

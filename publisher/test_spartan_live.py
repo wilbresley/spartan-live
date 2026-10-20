@@ -78,13 +78,13 @@ from spartan_live import (
 
 class PublisherTests(unittest.TestCase):
     def test_olho_e_ampulheta_separam_conta_e_link(self):
-        self.assertEqual(audience_counts({"viewers": 2, "guests": 3}), (2, 3))
-        self.assertEqual(audience_counts({"viewers": "4"}), (4, 0))
-        self.assertEqual(audience_counts({}), (0, 0))
-        self.assertEqual(audience_status(2, 0), ["👁 2 assistindo", "⏳ 0 pelo link"])
-        self.assertEqual(audience_status(0, 3), ["👁 0 assistindo", "⏳ 3 pelo link"])
-        self.assertEqual(audience_status(1, 4), ["👁 1 assistindo", "⏳ 4 pelo link"])
-        self.assertEqual(audience_status(0, 0), [])
+        self.assertEqual(audience_counts({"viewers": 2, "guests": 3, "permanent": 1}), (2, 3, 1))
+        self.assertEqual(audience_counts({"viewers": "4"}), (4, 0, 0))
+        self.assertEqual(audience_counts({}), (0, 0, 0))
+        self.assertEqual(audience_status(2, 0, 0), ["👁 2 assistindo", "⏳ 0 pelo link", "∞ 0 permanente"])
+        self.assertEqual(audience_status(0, 3, 0), ["👁 0 assistindo", "⏳ 3 pelo link", "∞ 0 permanente"])
+        self.assertEqual(audience_status(1, 4, 2), ["👁 1 assistindo", "⏳ 4 pelo link", "∞ 2 permanente"])
+        self.assertEqual(audience_status(0, 0, 0), [])
 
     def test_sessao_de_janela_fecha_sem_estar_aberta(self):
         grabber = _WGCWindowGrabber(0)
