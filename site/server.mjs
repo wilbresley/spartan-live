@@ -149,11 +149,27 @@ function shareFlags(name) {
   };
 }
 
-function guestMaySee(session, name) {
+export function guestInviteKind(session, now = Date.now()) {
+  if (!session || session.role !== "guest") return "";
+  if (session.kind === "permanent" || session.kind === "temporary") return session.kind;
+  const found = findGuestInvite(loadGuestStore(now), session.gid, now);
+  return found?.kind || "temporary";
+}
+
+export function guestMaySee(session, name, now = Date.now()) {
   if (!session || session.role !== "guest") return true;
   const flags = shareFlags(name);
-  if (session.kind === "permanent") return flags.guestsPerm;
-  return flags.guestsTemp;
+  return guestInviteKind(session, now) === "permanent" ? flags.guestsPerm : flags.guestsTemp;
+}
+
+export function rememberShare(name, guestsTemp, guestsPerm) {
+  if (!safeStreamName(name)) return false;
+  shareByStream.set(name, {
+    guestsTemp: Boolean(guestsTemp),
+    guestsPerm: Boolean(guestsPerm),
+    at: Date.now(),
+  });
+  return true;
 }
 
 function publisherAllowed(body) {
@@ -742,12 +758,12 @@ async function handle(req, res) {
       sendJson(res, 401, { error: "nao autorizado" });
       return;
     }
-    shareByStream.set(name, {
+    rememberShare(name, body.guestsTemp, body.guestsPerm);
+    sendJson(res, 200, {
+      ok: true,
       guestsTemp: Boolean(body.guestsTemp),
       guestsPerm: Boolean(body.guestsPerm),
-      at: Date.now(),
     });
-    sendJson(res, 200, { ok: true });
     return;
   }
 
@@ -821,7 +837,7 @@ async function handle(req, res) {
     sendJson(res, 200, {
       user: session.u,
       role: guest ? "guest" : "owner",
-      kind: guest ? (session.kind || "temporary") : "",
+      kind: guest ? guestInviteKind(session) : "",
       mustChange: guest ? false : Boolean(viewerRecord().mustChange),
       exp: guest ? session.exp : 0,
     });
@@ -897,7 +913,7 @@ async function handle(req, res) {
     if (needsLogin()) return;
     const body = await readJson(req);
     const names = Array.isArray(body.names) ? body.names : [];
-    const kind = guest ? (session.kind || "temporary") : "";
+    const kind = guest ? guestInviteKind(session) : "";
     const viewerKey = watcherKey(req, guest, kind);
     const now = Date.now();
     const book = !guest
@@ -916,7 +932,7 @@ async function handle(req, res) {
     const body = await readJson(req);
     const name = String(body.name || "");
     if (safeStreamName(name)) {
-      const kind = guest ? (session.kind || "temporary") : "";
+      const kind = guest ? guestInviteKind(session) : "";
       const viewerKey = watcherKey(req, guest, kind);
       dropViewer(viewersByStream, name, viewerKey);
       dropViewer(guestsByStream, name, viewerKey);

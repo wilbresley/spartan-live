@@ -62,8 +62,10 @@ const guestRevoke = document.querySelector("#guest-revoke");
 const guestPermCopy = document.querySelector("#guest-perm-copy");
 const guestPermRevoke = document.querySelector("#guest-perm-revoke");
 const guestRevokeAsk = document.querySelector("#guest-revoke-ask");
+const guestViewerStatus = document.querySelector("#guest-viewer-status");
 const guestGone = document.querySelector("#guest-gone");
 const guestGoneGif = document.querySelector("#guest-gone-gif");
+const gridNamesButton = document.querySelector("#grid-names");
 
 const SAD_INDEX_KEY = "spartan-live-sad-gif-idx";
 const HAPPY_INDEX_KEY = "spartan-live-happy-gif-idx";
@@ -354,6 +356,20 @@ function paintChimeButton() {
   button.classList.toggle("is-off", !on);
 }
 
+const GRID_NAMES_KEY = "spartan-live-grid-names";
+
+function gridNamesVisible() {
+  try { return localStorage.getItem(GRID_NAMES_KEY) !== "off"; } catch { return true; }
+}
+
+function paintGridNamesButton() {
+  if (!gridNamesButton) return;
+  const on = gridNamesVisible();
+  gridNamesButton.textContent = on ? "Ocultar nomes no grid" : "Ativar nomes no grid";
+  gridNamesButton.classList.toggle("is-off", !on);
+  appView.classList.toggle("hide-peer-names", !on);
+}
+
 function stopActiveChime() {
   if (currentChimeSource) {
     try { currentChimeSource.stop(); } catch { /* já parou */ }
@@ -515,6 +531,21 @@ function paintGuest() {
   if (guestPermSlot) guestPermSlot.classList.toggle("hidden", !hasPerm || guestView);
   if (guestTempSlot) guestTempSlot.classList.toggle("hidden", !hasTemp || guestView);
   if (hasTemp && guestClock) guestClock.textContent = guestRemainLabel(guestTempInvite.exp);
+  if (guestViewerStatus) {
+    if (!guestView) {
+      guestViewerStatus.classList.add("hidden");
+      guestViewerStatus.textContent = "";
+    } else if (viewerGuestKind === "permanent") {
+      guestViewerStatus.textContent = "Permanente";
+      guestViewerStatus.classList.remove("hidden");
+    } else if (guestTempInvite) {
+      guestViewerStatus.textContent = guestRemainLabel(guestTempInvite.exp);
+      guestViewerStatus.classList.remove("hidden");
+    } else {
+      guestViewerStatus.classList.add("hidden");
+      guestViewerStatus.textContent = "";
+    }
+  }
 }
 
 async function loadGuestBar() {
@@ -562,6 +593,7 @@ function showApp() {
   loginView.classList.add("hidden");
   passwordView.classList.add("hidden");
   appView.classList.remove("hidden");
+  paintGridNamesButton();
   fetchRawSounds();
   unlockSound();
 }
@@ -1806,6 +1838,7 @@ settingsButton.addEventListener("click", (event) => {
   if (opening) {
     placeSettings();
     paintChimeButton();
+    paintGridNamesButton();
   }
 });
 
@@ -1841,6 +1874,14 @@ document.querySelector("#chimes").addEventListener("click", (event) => {
   try { localStorage.setItem(CHIME_KEY, chimesEnabled() ? "off" : "on"); } catch { /* o navegador não guardou */ }
   paintChimeButton();
 });
+
+if (gridNamesButton) {
+  gridNamesButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    try { localStorage.setItem(GRID_NAMES_KEY, gridNamesVisible() ? "off" : "on"); } catch { /* o navegador não guardou */ }
+    paintGridNamesButton();
+  });
+}
 
 document.addEventListener("click", (event) => {
   if (settingsPop.classList.contains("hidden")) return;

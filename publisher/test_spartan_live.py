@@ -690,14 +690,16 @@ class PublisherTests(unittest.TestCase):
         self.assertGreater(size, 0)
 
     def test_botao_transmitir_cabe_na_janela(self):
+        from spartan_live import DEFAULT_HEIGHT, DEFAULT_WIDTH
+
         app = App()
         try:
-            app.geometry("560x720+-2400+-2400")
+            app.geometry(f"{DEFAULT_WIDTH}x{DEFAULT_HEIGHT}+-2400+-2400")
             app.update_idletasks()
             app.update()
             bottom = app.button.winfo_y() + app.button.winfo_height()
             self.assertGreater(app.button.winfo_height(), 30)
-            self.assertLessEqual(app.content.winfo_reqheight(), 720 - 44)
+            self.assertGreaterEqual(app.content.winfo_reqheight(), DEFAULT_HEIGHT - 44)
             self.assertLessEqual(bottom, app.content.winfo_height())
             self.assertLess(app.windows_check.winfo_y() + app.windows_check.winfo_height(), app.button.winfo_y())
             self.assertEqual(app.button.label, "Transmitir")
@@ -706,10 +708,16 @@ class PublisherTests(unittest.TestCase):
             self.assertIn("480p30", app.quality_buttons)
             self.assertEqual(app.quality_buttons["480p30"].label, "480p 30")
             b480 = app.quality_buttons["480p30"]
+            b1080_60 = app.quality_buttons["1080p60"]
             b720_60 = app.quality_buttons["720p60"]
             b720_30 = app.quality_buttons["720p30"]
+            self.assertGreater(b720_60.winfo_y(), b1080_60.winfo_y() + b1080_60.winfo_height() - 1)
             self.assertGreater(b480.winfo_y(), b720_60.winfo_y())
             self.assertGreaterEqual(b480.winfo_width(), b720_60.winfo_width() + b720_30.winfo_width())
+            self.assertTrue(hasattr(app, "share_temp_check"))
+            self.assertTrue(hasattr(app, "share_perm_check"))
+            self.assertFalse(app.share_temp_check.isChecked())
+            self.assertFalse(app.share_perm_check.isChecked())
         finally:
             app.destroy()
 
@@ -721,6 +729,8 @@ class PublisherTests(unittest.TestCase):
         self.assertIn("ultrafast", args)
 
     def test_janela_encolhida_mostra_barras_independentes_sem_esmagar_conteudo(self):
+        from spartan_live import DEFAULT_HEIGHT, DEFAULT_WIDTH
+
         self.assertEqual(scroll_bars_needed(560, 720, 558, 676), (False, False))
         self.assertEqual(scroll_bars_needed(560, 400, 558, 676), (False, True))
         self.assertEqual(scroll_bars_needed(350, 720, 558, 676), (True, False))
@@ -735,7 +745,7 @@ class PublisherTests(unittest.TestCase):
             app.update()
             self.assertTrue(app.v_scroll.winfo_ismapped())
             self.assertTrue(app.h_scroll.winfo_ismapped())
-            self.assertGreaterEqual(app.content.winfo_width(), 545)
+            self.assertGreaterEqual(app.content.winfo_width(), DEFAULT_WIDTH - 12)
             vbar = app.scroll_area.verticalScrollBar()
             hbar = app.scroll_area.horizontalScrollBar()
             self.assertEqual(vbar.value(), 0)
@@ -755,21 +765,28 @@ class PublisherTests(unittest.TestCase):
             )
             app.scroll_area.wheelEvent(ev_shift)
             self.assertGreater(hbar.value(), 0)
-            app.geometry("600x400+-2400+-2400")
+            app.geometry(f"{DEFAULT_WIDTH + 20}x400+-2400+-2400")
             app.update_idletasks()
             app.update()
             self.assertTrue(app.v_scroll.winfo_ismapped())
             self.assertFalse(app.h_scroll.winfo_ismapped())
-            app.geometry("350x760+-2400+-2400")
+            app.geometry(f"350x{DEFAULT_HEIGHT + 40}+-2400+-2400")
             app.update_idletasks()
             app.update()
             self.assertFalse(app.v_scroll.winfo_ismapped())
             self.assertTrue(app.h_scroll.winfo_ismapped())
-            app.geometry("560x720+-2400+-2400")
+            app.geometry(f"{DEFAULT_WIDTH}x{DEFAULT_HEIGHT}+-2400+-2400")
             app.update_idletasks()
             app.update()
             self.assertFalse(app.v_scroll.winfo_ismapped())
             self.assertFalse(app.h_scroll.winfo_ismapped())
+            app.geometry("560x720+-2400+-2400")
+            app.update_idletasks()
+            app.update()
+            self.assertTrue(app.v_scroll.winfo_ismapped())
+            b1080 = app.quality_buttons["1080p60"]
+            b720 = app.quality_buttons["720p60"]
+            self.assertGreater(b720.winfo_y(), b1080.winfo_y() + b1080.winfo_height() - 1)
         finally:
             app.destroy()
 
@@ -809,7 +826,8 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(clamp_gain(180), 150)
         mons = [{"left": 0, "top": 0, "width": 1920, "height": 1080}]
         self.assertIsNone(valid_saved_geom("560x720+-2400+-2400", mons))
-        self.assertEqual(valid_saved_geom("560x720+100+100", mons), "560x720+100+100")
+        self.assertIsNone(valid_saved_geom("560x720+100+100", mons))
+        self.assertEqual(valid_saved_geom("580x840+100+100", mons), "580x840+100+100")
         self.assertAlmostEqual(progress_speed("speed=0.82x"), 0.82)
         self.assertIsNone(progress_speed("speed=N/A"))
         streak = 0

@@ -15,7 +15,7 @@ process.env.PUBLISH_USER = "pub";
 process.env.PUBLISH_PASSWORD = "pub-segredo";
 process.env.DATA_DIR = dataDir;
 
-const { onRequest, signSession } = await import("./server.mjs");
+const { onRequest, signSession, guestMaySee, rememberShare } = await import("./server.mjs");
 
 function listen() {
   const server = http.createServer(onRequest);
@@ -192,6 +192,29 @@ test("um convite por vez, o convidado assiste e o link morto fica cinza", async 
     });
     assert.equal(fresh.status, 200);
     assert.notEqual(fresh.json.temporary.path, made.json.temporary.path);
+
+    rememberShare("ana", true, false);
+    const permSession = { role: "guest", kind: "permanent", gid: "x" };
+    const tempSession = { role: "guest", kind: "temporary", gid: "y" };
+    assert.equal(guestMaySee(permSession, "ana"), false);
+    assert.equal(guestMaySee(tempSession, "ana"), true);
+    const shareOnlyPerm = await ask(server, {
+      method: "POST",
+      path: "/api/share",
+      body: JSON.stringify({ name: "ana", user: "pub", password: "pub-segredo", guestsTemp: false, guestsPerm: true }),
+    });
+    assert.equal(shareOnlyPerm.status, 200);
+    assert.equal(shareOnlyPerm.json.guestsTemp, false);
+    assert.equal(shareOnlyPerm.json.guestsPerm, true);
+    assert.equal(guestMaySee(permSession, "ana"), true);
+    assert.equal(guestMaySee(tempSession, "ana"), false);
+    await ask(server, {
+      method: "POST",
+      path: "/api/share",
+      body: JSON.stringify({ name: "ana", user: "pub", password: "pub-segredo", guestsTemp: false, guestsPerm: false }),
+    });
+    assert.equal(guestMaySee(permSession, "ana"), false);
+    assert.equal(guestMaySee(tempSession, "ana"), false);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     fs.rmSync(dataDir, { recursive: true, force: true });

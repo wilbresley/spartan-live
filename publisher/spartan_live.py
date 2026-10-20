@@ -21,6 +21,7 @@ from PySide6.QtGui import QPainter, QColor, QPen, QFont, QFontMetrics, QPainterP
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QCheckBox, QScrollArea, QFrame, QMessageBox, QPushButton,
+    QSizePolicy,
 )
 
 import numpy as np
@@ -3125,7 +3126,8 @@ def valid_saved_geom(geom, monitors):
     if not match:
         return None
     w, h, x, y = (int(part) for part in match.groups())
-    if w < 200 or h < 200:
+    # Abaixo do padrão novo a caixa não cabe o formulário; descarta e abre no tamanho atual.
+    if w < DEFAULT_WIDTH - 40 or h < DEFAULT_HEIGHT - 80:
         return None
     cx = x + w // 2
     cy = y + min(40, h // 2)
@@ -3961,6 +3963,7 @@ class PillButton(QWidget):
         self._height = int(height)
         self.setFixedHeight(self._height)
         self.setMinimumWidth(80)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def config(self, **kwargs):
@@ -4339,8 +4342,8 @@ def load_square_icon(path, size):
     return handle or None
 
 
-DEFAULT_WIDTH = 560
-DEFAULT_HEIGHT = 720
+DEFAULT_WIDTH = 580
+DEFAULT_HEIGHT = 840
 RESIZE_GRIP = 6
 
 
@@ -4477,13 +4480,22 @@ class _ScrollArea(QScrollArea):
 
 class _ContentWidget(QWidget):
     def sizeHint(self):
-        return QSize(DEFAULT_WIDTH - 2, DEFAULT_HEIGHT - 44)
+        layout = self.layout()
+        if layout is not None:
+            layout.activate()
+            hint = layout.sizeHint()
+            if hint.width() > 0 and hint.height() > 0:
+                return QSize(
+                    max(DEFAULT_WIDTH - 12, hint.width()),
+                    max(DEFAULT_HEIGHT - 44, hint.height()),
+                )
+        return QSize(DEFAULT_WIDTH - 12, DEFAULT_HEIGHT - 44)
 
     def minimumSizeHint(self):
-        return QSize(1, 1)
+        return self.sizeHint()
 
     def winfo_reqheight(self):
-        return DEFAULT_HEIGHT - 44
+        return max(DEFAULT_HEIGHT - 44, self.sizeHint().height())
 
     def winfo_height(self):
         return self.height()
@@ -5268,8 +5280,9 @@ class App(QWidget):
     def _sync_viewport(self, w=None, h=None):
         if not hasattr(self, "scroll_area") or not hasattr(self, "content"):
             return
-        base_w = DEFAULT_WIDTH - 12
-        base_h = DEFAULT_HEIGHT - 44
+        natural = self.content.sizeHint()
+        base_w = max(DEFAULT_WIDTH - 12, int(natural.width()))
+        base_h = max(DEFAULT_HEIGHT - 44, int(natural.height()))
         ms = getattr(self, "_manual_size", None)
         eff_w = int(w) if isinstance(w, (int, float)) else (ms[0] if ms else self.width())
         eff_h = int(h) if isinstance(h, (int, float)) else (ms[1] if ms else self.height())
@@ -5293,6 +5306,7 @@ class App(QWidget):
         self.scroll_area.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOn if need_x else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
+        self.content.setMinimumSize(base_w, base_h)
         self.content.resize(target_w, target_h)
 
     def _field(self, label, variable, hint="", max_len=0, allow=""):
