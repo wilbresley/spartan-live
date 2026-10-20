@@ -6,6 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 import numpy as np
 import soxr
@@ -718,6 +719,35 @@ class PublisherTests(unittest.TestCase):
             self.assertTrue(hasattr(app, "share_perm_check"))
             self.assertFalse(app.share_temp_check.isChecked())
             self.assertFalse(app.share_perm_check.isChecked())
+            sent = []
+
+            def capture(host, nick, user, password, guests_temp, guests_perm):
+                sent.append((bool(guests_temp), bool(guests_perm)))
+                return True
+
+            app.running = True
+            app.stopping = False
+            app.live_nick = "Bresley"
+            app.live_host = "192.168.100.16"
+            app.publish = {"user": "pub", "password": "segredo"}
+            with mock.patch("spartan_live.post_share", side_effect=capture):
+                app.share_perm_check.setChecked(True)
+                app.update_idletasks()
+                time.sleep(0.05)
+                self.assertEqual(app._share_flags(), (False, True))
+                self.assertIn((False, True), sent)
+                sent.clear()
+                app.share_temp_check.setChecked(True)
+                app.update_idletasks()
+                time.sleep(0.05)
+                self.assertEqual(app._share_flags(), (True, True))
+                self.assertIn((True, True), sent)
+                sent.clear()
+                app.share_perm_check.setChecked(False)
+                app.update_idletasks()
+                time.sleep(0.05)
+                self.assertEqual(app._share_flags(), (True, False))
+                self.assertIn((True, False), sent)
         finally:
             app.destroy()
 
@@ -827,7 +857,8 @@ class PublisherTests(unittest.TestCase):
         mons = [{"left": 0, "top": 0, "width": 1920, "height": 1080}]
         self.assertIsNone(valid_saved_geom("560x720+-2400+-2400", mons))
         self.assertIsNone(valid_saved_geom("560x720+100+100", mons))
-        self.assertEqual(valid_saved_geom("580x840+100+100", mons), "580x840+100+100")
+        self.assertEqual(valid_saved_geom("580x760+100+100", mons), "580x760+100+100")
+        self.assertIsNone(valid_saved_geom("500x700+100+100", mons))
         self.assertAlmostEqual(progress_speed("speed=0.82x"), 0.82)
         self.assertIsNone(progress_speed("speed=N/A"))
         streak = 0

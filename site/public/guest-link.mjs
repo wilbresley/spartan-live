@@ -45,8 +45,11 @@ export function normalizeGuestStore(raw, now = Date.now()) {
 
 export function findGuestInvite(store, id, now = Date.now()) {
   const book = normalizeGuestStore(store, now);
-  if (book.temporary?.id === id) return { invite: book.temporary, kind: "temporary" };
   if (book.permanent?.id === id) return { invite: book.permanent, kind: "permanent" };
+  if (book.temporary?.id === id) {
+    const kind = book.temporary.kind === "permanent" ? "permanent" : "temporary";
+    return { invite: book.temporary, kind };
+  }
   return null;
 }
 

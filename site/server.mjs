@@ -151,22 +151,27 @@ function shareFlags(name) {
 
 export function guestInviteKind(session, now = Date.now()) {
   if (!session || session.role !== "guest") return "";
-  if (session.kind === "permanent" || session.kind === "temporary") return session.kind;
+  // O arquivo de convites manda: cookie antigo com kind errado não vira temporário.
   const found = findGuestInvite(loadGuestStore(now), session.gid, now);
-  return found?.kind || "temporary";
+  if (found?.kind === "permanent" || found?.kind === "temporary") return found.kind;
+  if (session.kind === "permanent" || session.kind === "temporary") return session.kind;
+  return "";
 }
 
 export function guestMaySee(session, name, now = Date.now()) {
   if (!session || session.role !== "guest") return true;
   const flags = shareFlags(name);
-  return guestInviteKind(session, now) === "permanent" ? flags.guestsPerm : flags.guestsTemp;
+  const kind = guestInviteKind(session, now);
+  if (kind === "permanent") return flags.guestsPerm;
+  if (kind === "temporary") return flags.guestsTemp;
+  return false;
 }
 
 export function rememberShare(name, guestsTemp, guestsPerm) {
   if (!safeStreamName(name)) return false;
   shareByStream.set(name, {
-    guestsTemp: Boolean(guestsTemp),
-    guestsPerm: Boolean(guestsPerm),
+    guestsTemp: guestsTemp === true || guestsTemp === 1 || guestsTemp === "true",
+    guestsPerm: guestsPerm === true || guestsPerm === 1 || guestsPerm === "true",
     at: Date.now(),
   });
   return true;
@@ -759,10 +764,11 @@ async function handle(req, res) {
       return;
     }
     rememberShare(name, body.guestsTemp, body.guestsPerm);
+    const flags = shareFlags(name);
     sendJson(res, 200, {
       ok: true,
-      guestsTemp: Boolean(body.guestsTemp),
-      guestsPerm: Boolean(body.guestsPerm),
+      guestsTemp: flags.guestsTemp,
+      guestsPerm: flags.guestsPerm,
     });
     return;
   }

@@ -396,13 +396,16 @@ def post_share(host, nick, user, password, guests_temp, guests_perm):
     targets = notify_targets(host, "share")
     if not targets or not nick or not user or not password:
         return False
+    temp = bool(guests_temp)
+    perm = bool(guests_perm)
     payload = json.dumps({
         "name": nick,
         "user": user,
         "password": password,
-        "guestsTemp": bool(guests_temp),
-        "guestsPerm": bool(guests_perm),
+        "guestsTemp": temp,
+        "guestsPerm": perm,
     }).encode("utf-8")
+    last = "falhou"
     for url in targets:
         request = urllib.request.Request(
             url,
@@ -413,9 +416,12 @@ def post_share(host, nick, user, password, guests_temp, guests_perm):
         try:
             with urllib.request.urlopen(request, timeout=3) as response:
                 if 200 <= response.status < 300:
+                    log_event(f"share aceito apelido={nick} temp={temp} perm={perm}")
                     return True
-        except Exception:
-            continue
+                last = f"http{response.status}"
+        except Exception as error:
+            last = type(error).__name__
+    log_event(f"share falhou apelido={nick} temp={temp} perm={perm} {last}")
     return False
 
 
@@ -3126,8 +3132,8 @@ def valid_saved_geom(geom, monitors):
     if not match:
         return None
     w, h, x, y = (int(part) for part in match.groups())
-    # Abaixo do padrão novo a caixa não cabe o formulário; descarta e abre no tamanho atual.
-    if w < DEFAULT_WIDTH - 40 or h < DEFAULT_HEIGHT - 80:
+    # Abaixo do padrão a caixa não cabe o formulário; descarta e abre no tamanho atual.
+    if w < DEFAULT_WIDTH or h < DEFAULT_HEIGHT:
         return None
     cx = x + w // 2
     cy = y + min(40, h // 2)
@@ -4343,7 +4349,7 @@ def load_square_icon(path, size):
 
 
 DEFAULT_WIDTH = 580
-DEFAULT_HEIGHT = 840
+DEFAULT_HEIGHT = 760
 RESIZE_GRIP = 6
 
 
@@ -4484,11 +4490,12 @@ class _ContentWidget(QWidget):
         if layout is not None:
             layout.activate()
             hint = layout.sizeHint()
-            if hint.width() > 0 and hint.height() > 0:
-                return QSize(
-                    max(DEFAULT_WIDTH - 12, hint.width()),
-                    max(DEFAULT_HEIGHT - 44, hint.height()),
-                )
+            minimum = layout.minimumSize()
+            # minimumSize ignora o stretch: senão a janela nasce maior que o formulário.
+            width = max(DEFAULT_WIDTH - 12, hint.width(), minimum.width())
+            height = max(DEFAULT_HEIGHT - 44, minimum.height())
+            if width > 0 and height > 0:
+                return QSize(width, height)
         return QSize(DEFAULT_WIDTH - 12, DEFAULT_HEIGHT - 44)
 
     def minimumSizeHint(self):
@@ -5257,18 +5264,19 @@ class App(QWidget):
 
         self.share_temp = False
         self.share_perm = False
+        self._share_seq = 0
         self.share_temp_check = _CheckProxy("Compartilhar com convidados temporários", self.content)
         self.share_temp_check.setFont(QFont("Segoe UI", 10))
         self.share_temp_check.setChecked(False)
         self.share_temp_check.setStyleSheet(check_style)
-        self.share_temp_check.toggled.connect(lambda state: self._share_toggled("temp", state))
+        self.share_temp_check.toggled.connect(self._on_share_temp)
         self._content_layout.addWidget(self.share_temp_check)
 
         self.share_perm_check = _CheckProxy("Compartilhar com convidados permanentes", self.content)
         self.share_perm_check.setFont(QFont("Segoe UI", 10))
         self.share_perm_check.setChecked(False)
         self.share_perm_check.setStyleSheet(check_style)
-        self.share_perm_check.toggled.connect(lambda state: self._share_toggled("perm", state))
+        self.share_perm_check.toggled.connect(self._on_share_perm)
         self._content_layout.addWidget(self.share_perm_check)
 
         self._content_layout.addStretch(1)
@@ -5543,12 +5551,21 @@ class App(QWidget):
             parts.append("Internet ou PC sofrendo — tente 720p 30 ou 480p 30")
         return " · ".join(parts)
 
-    def _share_toggled(self, kind, state):
-        if kind == "perm":
-            self.share_perm = bool(state)
-        else:
-            self.share_temp = bool(state)
+    def _on_share_temp(self, checked):
+        self.share_temp = bool(checked)
         self._push_share()
+
+    def _on_share_perm(self, checked):
+        self.share_perm = bool(checked)
+        self._push_share()
+
+    def _share_flags(self):
+        """Caixas são a fonte da verdade — cada uma manda só o seu tipo no servidor."""
+        temp = bool(self.share_temp_check.isChecked()) if hasattr(self, "share_temp_check") else bool(self.share_temp)
+        perm = bool(self.share_perm_check.isChecked()) if hasattr(self, "share_perm_check") else bool(self.share_perm)
+        self.share_temp = temp
+        self.share_perm = perm
+        return temp, perm
 
     def _push_share(self):
         if not self.running or self.stopping:
@@ -5559,13 +5576,16 @@ class App(QWidget):
         password = str(self.publish.get("password") or "")
         if not (nick and host and user and password):
             return
-        temp = bool(self.share_temp)
-        perm = bool(self.share_perm)
-        threading.Thread(
-            target=post_share,
-            args=(host, nick, user, password, temp, perm),
-            daemon=True,
-        ).start()
+        temp, perm = self._share_flags()
+        self._share_seq = getattr(self, "_share_seq", 0) + 1
+        seq = self._share_seq
+
+        def worker():
+            if seq != self._share_seq:
+                return
+            post_share(host, nick, user, password, temp, perm)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _refresh_live_status(self):
         if not self.running or not self._base_status:
@@ -5609,7 +5629,7 @@ class App(QWidget):
                     ).start()
 
     def _poll_viewers_worker(self, host, nick, user, password):
-        post_share(host, nick, user, password, bool(self.share_temp), bool(self.share_perm))
+        # Não reenvia share aqui: um POST atrasado apagava o permanente com estado velho.
         viewers, guests, permanent = fetch_viewers(host, nick, user, password)
         if not self.running or self.stopping or self.live_nick != nick:
             return

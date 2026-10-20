@@ -193,9 +193,21 @@ test("um convite por vez, o convidado assiste e o link morto fica cinza", async 
     assert.equal(fresh.status, 200);
     assert.notEqual(fresh.json.temporary.path, made.json.temporary.path);
 
+    const permId = permanent.json.permanent.path.slice(3);
+    const tempId = fresh.json.temporary.path.slice(3);
+    // Cookie com kind errado ainda resolve pelo gid do permanente.
+    const wrongKindCookie = `spartan_live=${encodeURIComponent(signSession("spartan", Date.now(), {
+      role: "guest",
+      gid: permId,
+      kind: "temporary",
+      exp: Date.now() + 86400000,
+    }))}`;
+    const fixedKind = await ask(server, { path: "/api/me", cookie: wrongKindCookie });
+    assert.equal(fixedKind.json.kind, "permanent");
+
     rememberShare("ana", true, false);
-    const permSession = { role: "guest", kind: "permanent", gid: "x" };
-    const tempSession = { role: "guest", kind: "temporary", gid: "y" };
+    const permSession = { role: "guest", kind: "temporary", gid: permId };
+    const tempSession = { role: "guest", kind: "permanent", gid: tempId };
     assert.equal(guestMaySee(permSession, "ana"), false);
     assert.equal(guestMaySee(tempSession, "ana"), true);
     const shareOnlyPerm = await ask(server, {
@@ -208,6 +220,13 @@ test("um convite por vez, o convidado assiste e o link morto fica cinza", async 
     assert.equal(shareOnlyPerm.json.guestsPerm, true);
     assert.equal(guestMaySee(permSession, "ana"), true);
     assert.equal(guestMaySee(tempSession, "ana"), false);
+    await ask(server, {
+      method: "POST",
+      path: "/api/share",
+      body: JSON.stringify({ name: "ana", user: "pub", password: "pub-segredo", guestsTemp: true, guestsPerm: false }),
+    });
+    assert.equal(guestMaySee(permSession, "ana"), false);
+    assert.equal(guestMaySee(tempSession, "ana"), true);
     await ask(server, {
       method: "POST",
       path: "/api/share",
