@@ -591,7 +591,7 @@ function closeAudience() {
   audiencePop?.classList.add("hidden");
 }
 
-function paintAudience() {
+function paintAudienceList() {
   if (!audiencePop || !audienceList || !audienceTitle) return;
   audienceList.replaceChildren();
   if (!audienceLive) {
@@ -613,7 +613,7 @@ function paintAudience() {
       button.textContent = marks ? `${live.name}  ${marks}` : live.name;
       button.addEventListener("click", () => {
         audienceLive = live.name;
-        paintAudience();
+        paintAudienceList();
       });
       item.append(button);
       audienceList.append(item);
@@ -647,7 +647,7 @@ async function openAudience() {
     audienceCache = Array.isArray(data.lives) ? data.lives : [];
     audienceLive = "";
     audiencePop.classList.remove("hidden");
-    paintAudience();
+    paintAudienceList();
   } catch (error) {
     if (error.guestEnded) showGuestGone(error.guestEnd);
   }
@@ -1907,7 +1907,7 @@ document.addEventListener("keydown", (event) => {
     if (audiencePop && !audiencePop.classList.contains("hidden")) {
       if (audienceLive) {
         audienceLive = "";
-        paintAudience();
+        paintAudienceList();
       } else {
         closeAudience();
       }
@@ -2225,7 +2225,7 @@ if (audienceOpen) {
 }
 audienceBack?.addEventListener("click", () => {
   audienceLive = "";
-  paintAudience();
+  paintAudienceList();
 });
 audienceClose?.addEventListener("click", closeAudience);
 audiencePop?.addEventListener("click", (event) => {
