@@ -47,7 +47,9 @@
       </div>
       <div class="header-actions">
         <div id="guest-tools">
+          <button id="audience-open" type="button">Espectadores</button>
           <button id="guest-generate" type="button">Gerar link</button>
+          <span id="guest-warn" class="guest-warn hidden" role="status"></span>
           <div id="guest-hours" class="hidden">
             <button type="button" data-hours="3">3h</button>
             <button type="button" data-hours="6">6h</button>
@@ -98,7 +100,7 @@
       <div id="stage">
         <div id="hidden-lives"></div>
         <div id="empty" class="empty hidden">
-          <img id="empty-gif" class="empty-gif" src="/gifs/sad-1.gif?v3" alt="" draggable="false">
+          <img id="empty-gif" class="empty-gif" src="/gifs/sad-1.gif?v5" alt="" draggable="false">
           <p id="empty-text" class="empty-text">Ninguém está transmitindo agora.</p>
         </div>
         <div id="video-container" class="hidden">
@@ -109,8 +111,34 @@
     </div>
   </section>
 
+  <section id="nick-ask" class="login-wrap hidden">
+    <form id="nick-form" class="panel">
+      <img class="login-logo" src="/spartan-live.png" alt="Spartan Live">
+      <h1>Como te chamam?</h1>
+      <p class="muted">Esse apelido aparece na lista de quem está assistindo. Fica só neste navegador. Não é o nome da senha.</p>
+      <label>
+        Apelido
+        <input id="nick-input" name="nick" maxlength="24" autocomplete="nickname" required>
+      </label>
+      <p id="nick-error" class="error" role="alert"></p>
+      <button type="submit">Entrar na grade</button>
+    </form>
+  </section>
+
+  <div id="audience-pop" class="hidden" role="dialog" aria-modal="true" aria-labelledby="audience-title">
+    <div class="audience-card">
+      <h2 id="audience-title">Lives</h2>
+      <p id="audience-empty" class="muted hidden"></p>
+      <ul id="audience-list"></ul>
+      <div class="audience-actions">
+        <button id="audience-back" type="button" class="hidden">Voltar</button>
+        <button id="audience-close" type="button">Fechar</button>
+      </div>
+    </div>
+  </div>
+
   <section id="guest-gone" class="hidden">
-    <img id="guest-gone-gif" src="/gifs/sad-1.gif?v3" alt="" draggable="false">
+    <img id="guest-gone-gif" src="/gifs/sad-1.gif?v5" alt="" draggable="false">
     <p>Esse link não existe mais.</p>
   </section>
 

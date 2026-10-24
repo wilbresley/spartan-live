@@ -118,13 +118,26 @@ test("um convite por vez, o convidado assiste e o link morto fica cinza", async 
       body: JSON.stringify({ name: "ana", user: "pub", password: "pub-segredo", guestsTemp: true, guestsPerm: false }),
     });
 
-    await ask(server, { method: "POST", path: "/api/watch", cookie: owner, body: JSON.stringify({ names: ["ana"] }) });
+    const nameless = await ask(server, {
+      method: "POST",
+      path: "/api/watch",
+      cookie: owner,
+      body: JSON.stringify({ names: ["ana"] }),
+    });
+    assert.equal(nameless.status, 400);
+
+    await ask(server, {
+      method: "POST",
+      path: "/api/watch",
+      cookie: owner,
+      body: JSON.stringify({ names: ["ana"], nick: "Bresley" }),
+    });
     await ask(server, {
       method: "POST",
       path: "/api/watch",
       cookie: guest,
       headers: { "user-agent": "visitante" },
-      body: JSON.stringify({ names: ["ana"] }),
+      body: JSON.stringify({ names: ["ana"], nick: "Adi" }),
     });
     const counted = await ask(server, {
       method: "POST",
@@ -134,6 +147,17 @@ test("um convite por vez, o convidado assiste e o link morto fica cinza", async 
     assert.equal(counted.json.viewers, 1);
     assert.equal(counted.json.guests, 1);
     assert.equal(counted.json.permanent, 0);
+    assert.deepEqual(counted.json.people.map((row) => row.nick).sort(), ["Adi", "Bresley"]);
+
+    const audience = await ask(server, { path: "/api/audience", cookie: owner });
+    assert.equal(audience.status, 200);
+    const ana = audience.json.lives.find((row) => row.name === "ana");
+    assert.ok(ana);
+    assert.equal(ana.viewers, 1);
+    assert.equal(ana.guests, 1);
+    assert.deepEqual(ana.people.map((row) => row.nick).sort(), ["Adi", "Bresley"]);
+    const guestAudience = await ask(server, { path: "/api/audience", cookie: guest });
+    assert.equal(guestAudience.status, 401);
 
     const permEnter = await ask(server, { path: permanent.json.permanent.path });
     const permGuest = cookieOf(permEnter.headers);
@@ -142,6 +166,12 @@ test("um convite por vez, o convidado assiste e o link morto fica cinza", async 
     assert.equal(permMe.json.accessId, 3);
 
     await ask(server, { method: "POST", path: "/api/unwatch", cookie: owner, body: JSON.stringify({ name: "ana" }) });
+    const afterPeople = await ask(server, {
+      method: "POST",
+      path: "/api/viewers",
+      body: JSON.stringify({ name: "ana", user: "pub", password: "pub-segredo" }),
+    });
+    assert.deepEqual(afterPeople.json.people.map((row) => row.nick), ["Adi"]);
     const afterLeave = await ask(server, {
       method: "POST",
       path: "/api/viewers",

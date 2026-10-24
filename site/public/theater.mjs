@@ -216,7 +216,39 @@ export function countViewers(book, name, now = Date.now(), ttlMs = VIEWER_TTL_MS
   return room.size;
 }
 
-export const GIF_CACHE = "v3";
+export function touchRoster(book, name, viewerId, nick, kind, now = Date.now()) {
+  if (!name || !viewerId || !nick) return;
+  let room = book.get(name);
+  if (!room) {
+    room = new Map();
+    book.set(name, room);
+  }
+  room.set(viewerId, { nick, kind: kind || "owner", at: now });
+}
+
+export function listRoster(book, name, now = Date.now(), ttlMs = VIEWER_TTL_MS) {
+  const room = book.get(name);
+  if (!room) return [];
+  const people = [];
+  for (const [id, row] of room.entries()) {
+    const at = Number(row?.at) || 0;
+    if (now - at > ttlMs) {
+      room.delete(id);
+      continue;
+    }
+    const nick = String(row?.nick || "").trim();
+    if (!nick) {
+      room.delete(id);
+      continue;
+    }
+    people.push({ nick, kind: row.kind || "owner" });
+  }
+  if (room.size === 0) book.delete(name);
+  people.sort((a, b) => a.nick.localeCompare(b.nick, "pt-BR"));
+  return people;
+}
+
+export const GIF_CACHE = "v5";
 export const SAD_GIFS = Array.from({ length: 12 }, (_, idx) => `/gifs/sad-${idx + 1}.gif?${GIF_CACHE}`);
 export const HAPPY_GIFS = Array.from({ length: 12 }, (_, idx) => `/gifs/happy-${idx + 1}.gif?${GIF_CACHE}`);
 

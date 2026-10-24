@@ -1,5 +1,6 @@
 import { formatOnAir, isFollowingLive, liveLedSynced, playbackGlitch, rewindWindow, shouldSnapToLive } from "./buffer-math.mjs";
 import { guestEndMessage, guestRemainLabel, PERMANENT_HOLD_MS } from "./guest-link.mjs";
+import { cleanNick, kindMark, NICK_KEY, sortPeople } from "./nick-tag.mjs";
 import { dueChimes, freshArrivals, nextPresence } from "./presence.mjs";
 import { createRailState, railAfterEmpty, railAfterHover, railAfterPinToggle, visualRailOpen } from "./rail-peek.mjs";
 import { claimReturn, pruneReturns, rememberReturn } from "./quick-return.mjs";
@@ -53,6 +54,18 @@ const count = document.querySelector("#count");
 const logoutButton = document.querySelector("#logout");
 const theaterButton = document.querySelector("#theater-toggle");
 const guestGenerate = document.querySelector("#guest-generate");
+const audienceOpen = document.querySelector("#audience-open");
+const audiencePop = document.querySelector("#audience-pop");
+const audienceTitle = document.querySelector("#audience-title");
+const audienceList = document.querySelector("#audience-list");
+const audienceEmpty = document.querySelector("#audience-empty");
+const audienceBack = document.querySelector("#audience-back");
+const audienceClose = document.querySelector("#audience-close");
+const guestWarn = document.querySelector("#guest-warn");
+const nickAsk = document.querySelector("#nick-ask");
+const nickForm = document.querySelector("#nick-form");
+const nickInput = document.querySelector("#nick-input");
+const nickError = document.querySelector("#nick-error");
 const guestHours = document.querySelector("#guest-hours");
 const guestPermSlot = document.querySelector("#guest-permanent");
 const guestTempSlot = document.querySelector("#guest-temporary");
@@ -502,8 +515,143 @@ let guestCopyTimer = 0;
 let guestGoneTimer = 0;
 let guestGifIndex = 0;
 let guestRevokeKind = "temporary";
+let guestWarnTimer = 0;
+let audienceCache = [];
+let audienceLive = "";
 let manualFocus = null;
 let autoFocus = false;
+
+function storedNick() {
+  try { return cleanNick(localStorage.getItem(NICK_KEY) || ""); } catch { return ""; }
+}
+
+function rememberNick(value) {
+  try { localStorage.setItem(NICK_KEY, value); } catch { /* sem armazenamento */ }
+}
+
+function watchPayload(names) {
+  return JSON.stringify({ names, nick: storedNick() });
+}
+
+function pingWatch(names) {
+  if (!storedNick() || !names.length) return;
+  fetch("/api/watch", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "content-type": "application/json" },
+    body: watchPayload(names),
+  }).catch(() => {});
+}
+
+function showGuestWarn(text) {
+  if (!guestWarn) return;
+  guestWarn.textContent = text;
+  guestWarn.classList.remove("hidden");
+  window.clearTimeout(guestWarnTimer);
+  guestWarnTimer = window.setTimeout(() => {
+    guestWarn.classList.add("hidden");
+    guestWarn.textContent = "";
+  }, 4000);
+}
+
+function nickGateOpen() {
+  return Boolean(nickAsk && !nickAsk.classList.contains("hidden"));
+}
+
+function showNickGate() {
+  if (!nickAsk) return;
+  loginView.classList.add("hidden");
+  passwordView.classList.add("hidden");
+  appView.classList.add("hidden");
+  nickAsk.classList.remove("hidden");
+  if (nickInput) nickInput.value = "";
+  if (nickError) nickError.textContent = "";
+  nickInput?.focus();
+}
+
+function hideNickGate() {
+  nickAsk?.classList.add("hidden");
+}
+
+function enterApp() {
+  hideGuestGone();
+  if (!storedNick()) {
+    showNickGate();
+    return;
+  }
+  hideNickGate();
+  showApp();
+  paintGuest();
+  if (viewerRole === "owner") return loadGuestBar().then(() => refresh());
+  return refresh();
+}
+
+function closeAudience() {
+  audienceLive = "";
+  audiencePop?.classList.add("hidden");
+}
+
+function paintAudience() {
+  if (!audiencePop || !audienceList || !audienceTitle) return;
+  audienceList.replaceChildren();
+  if (!audienceLive) {
+    audienceTitle.textContent = "Lives";
+    audienceBack?.classList.add("hidden");
+    if (!audienceCache.length) {
+      if (audienceEmpty) {
+        audienceEmpty.textContent = "Nenhuma live no ar.";
+        audienceEmpty.classList.remove("hidden");
+      }
+      return;
+    }
+    audienceEmpty?.classList.add("hidden");
+    for (const live of audienceCache) {
+      const item = document.createElement("li");
+      const button = document.createElement("button");
+      button.type = "button";
+      const marks = audienceMarks(live.viewers, live.guests, live.permanent);
+      button.textContent = marks ? `${live.name}  ${marks}` : live.name;
+      button.addEventListener("click", () => {
+        audienceLive = live.name;
+        paintAudience();
+      });
+      item.append(button);
+      audienceList.append(item);
+    }
+    return;
+  }
+  const live = audienceCache.find((row) => row.name === audienceLive);
+  audienceTitle.textContent = `Espectadores · ${audienceLive}`;
+  audienceBack?.classList.remove("hidden");
+  const people = sortPeople(live?.people || []);
+  if (!people.length) {
+    if (audienceEmpty) {
+      audienceEmpty.textContent = "Ninguém assistindo agora.";
+      audienceEmpty.classList.remove("hidden");
+    }
+    return;
+  }
+  audienceEmpty?.classList.add("hidden");
+  for (const person of people) {
+    const item = document.createElement("li");
+    const mark = kindMark(person.kind);
+    item.textContent = mark ? `${person.nick}  ${mark}` : person.nick;
+    audienceList.append(item);
+  }
+}
+
+async function openAudience() {
+  if (viewerRole !== "owner") return;
+  try {
+    const data = await api("/api/audience");
+    audienceCache = Array.isArray(data.lives) ? data.lives : [];
+    audienceLive = "";
+    audiencePop.classList.remove("hidden");
+    paintAudience();
+  } catch (error) {
+    if (error.guestEnded) showGuestGone(error.guestEnd);
+  }
+}
 
 function hideGuestGone() {
   window.clearInterval(guestGoneTimer);
@@ -519,6 +667,8 @@ function showGuestGone(reason) {
   loginView.classList.add("hidden");
   passwordView.classList.add("hidden");
   appView.classList.add("hidden");
+  hideNickGate();
+  closeAudience();
   guestGone.classList.remove("hidden");
   guestGoneGif.src = SAD_GIFS[guestGifIndex] || SAD_GIFS[0];
   guestGoneTimer = window.setInterval(() => {
@@ -542,7 +692,8 @@ function paintGuest() {
   const guestView = viewerRole === "guest";
   const hasTemp = Boolean(guestTempInvite);
   const hasPerm = Boolean(guestPermInvite);
-  guestGenerate.classList.toggle("hidden", guestView || guestPicking || hasTemp);
+  guestGenerate.classList.toggle("hidden", guestView || guestPicking);
+  if (audienceOpen) audienceOpen.classList.toggle("hidden", guestView);
   guestHours.classList.toggle("hidden", !guestPicking || guestView);
   if (guestPermSlot) guestPermSlot.classList.toggle("hidden", !hasPerm || guestView);
   if (guestTempSlot) guestTempSlot.classList.toggle("hidden", !hasTemp || guestView);
@@ -588,6 +739,9 @@ function showLogin() {
   guestPicking = false;
   window.clearTimeout(guestPickTimer);
   window.clearTimeout(guestHoldTimer);
+  window.clearTimeout(guestWarnTimer);
+  hideNickGate();
+  closeAudience();
   document.body.dataset.guest = "";
   appView.classList.add("hidden");
   passwordView.classList.add("hidden");
@@ -599,6 +753,8 @@ function showPasswordGate() {
   pendingChime = null;
   stopAll();
   hideGuestGone();
+  hideNickGate();
+  closeAudience();
   loginView.classList.add("hidden");
   appView.classList.add("hidden");
   passwordView.classList.remove("hidden");
@@ -1169,12 +1325,7 @@ function addStream(stream) {
       try { video.currentTime = edge; } catch { /* a live ainda está abrindo */ }
     }
     video.play().catch(() => {});
-    fetch("/api/watch", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ names: [stream.name] }),
-    }).catch(() => {});
+    pingWatch([stream.name]);
     paintTime();
   }
   function resumePlayback() {
@@ -1190,12 +1341,7 @@ function addStream(stream) {
     peer.lastMove = Date.now();
     ensureLink();
     video.play().catch(() => {});
-    fetch("/api/watch", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ names: [stream.name] }),
-    }).catch(() => {});
+    pingWatch([stream.name]);
   }
   play.addEventListener("click", () => {
     if (!video.paused) {
@@ -1650,14 +1796,7 @@ async function refresh() {
         watchingNames.push(name);
       }
     }
-    if (watchingNames.length) {
-      fetch("/api/watch", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ names: watchingNames }),
-      }).catch(() => {});
-    }
+    pingWatch(watchingNames);
     if (step.exit.length) queueChime("exit", step.exit);
     else queueChime("enter", newcomers);
     await flushChime(now);
@@ -1765,6 +1904,15 @@ document.addEventListener("keydown", (event) => {
   if (event.ctrlKey || event.altKey || event.metaKey) return;
 
   if (event.key === "Escape") {
+    if (audiencePop && !audiencePop.classList.contains("hidden")) {
+      if (audienceLive) {
+        audienceLive = "";
+        paintAudience();
+      } else {
+        closeAudience();
+      }
+      return;
+    }
     if (document.fullscreenElement) return;
     if (theaterActive(theaterState)) {
       theaterState = theaterAfterEscape(theaterState, Date.now());
@@ -1819,10 +1967,7 @@ loginForm.addEventListener("submit", async (event) => {
       }),
     });
     if (data.mustChange) showPasswordGate();
-    else {
-      showApp();
-      await refresh();
-    }
+    else await enterApp();
   } catch (error) {
     loginError.textContent = error.message;
   }
@@ -1832,8 +1977,7 @@ passwordForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
     await changePassword(passwordForm, passwordError);
-    showApp();
-    await refresh();
+    await enterApp();
   } catch (error) {
     passwordError.textContent = error.message;
   }
@@ -1978,7 +2122,10 @@ function clearGuestHold() {
 async function createPermanentInvite() {
   clearGuestHold();
   guestHoldDone = true;
-  if (guestPermInvite) return;
+  if (guestPermInvite) {
+    showGuestWarn("já tem permanente");
+    return;
+  }
   try {
     const data = await api("/api/guest", { method: "POST", body: JSON.stringify({ permanent: true }) });
     guestTempInvite = data.temporary?.active ? data.temporary : guestTempInvite;
@@ -2007,6 +2154,10 @@ guestGenerate.addEventListener("pointerup", () => {
   }
   if (!guestHoldTimer) return;
   clearGuestHold();
+  if (guestTempInvite) {
+    showGuestWarn("já tem temporário");
+    return;
+  }
   guestPicking = true;
   paintGuest();
   window.clearTimeout(guestPickTimer);
@@ -2066,8 +2217,35 @@ document.querySelector("#guest-revoke-confirm").addEventListener("click", async 
   paintGuest();
 });
 
+if (audienceOpen) {
+  audienceOpen.addEventListener("click", () => {
+    if (viewerRole !== "owner") return;
+    openAudience();
+  });
+}
+audienceBack?.addEventListener("click", () => {
+  audienceLive = "";
+  paintAudience();
+});
+audienceClose?.addEventListener("click", closeAudience);
+audiencePop?.addEventListener("click", (event) => {
+  if (event.target === audiencePop) closeAudience();
+});
+
+nickForm?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const nick = cleanNick(nickInput?.value || "");
+  if (!nick) {
+    if (nickError) nickError.textContent = "O apelido precisa ter 2 a 24 letras, números, espaço, _ ou -.";
+    return;
+  }
+  rememberNick(nick);
+  enterApp();
+});
+
 const timer = window.setInterval(() => {
   if (!guestGone.classList.contains("hidden")) return;
+  if (nickGateOpen()) return;
   if (guestTempInvite || guestPermInvite) paintGuest();
   if (!appView.classList.contains("hidden")) {
     if (viewerRole === "owner") loadGuestBar();
@@ -2102,10 +2280,7 @@ api("/api/me")
       if (viewerGuestKind === "permanent") guestPermInvite = { exp: me.exp };
       else guestTempInvite = { exp: me.exp };
     }
-    showApp();
-    paintGuest();
-    if (viewerRole === "owner") return loadGuestBar().then(() => refresh());
-    return refresh();
+    return enterApp();
   })
   .catch((error) => {
     if (error.guestEnded) showGuestGone(error.guestEnd);

@@ -21,7 +21,7 @@ from PySide6.QtGui import QPainter, QColor, QPen, QFont, QFontMetrics, QPainterP
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QCheckBox, QScrollArea, QFrame, QMessageBox, QPushButton,
-    QSizePolicy,
+    QSizePolicy, QDialog, QListWidget, QListWidgetItem, QFileDialog,
 )
 
 import numpy as np
@@ -358,6 +358,58 @@ def audience_counts(body):
     return clean(body.get("viewers")), clean(body.get("guests")), clean(body.get("permanent"))
 
 
+def clean_display_nick(value):
+    text = " ".join(str(value or "").split())
+    if not 2 <= len(text) <= 24:
+        return ""
+    for ch in text:
+        if ch.isalnum() or ch in " _-":
+            continue
+        return ""
+    return text
+
+
+def audience_kind_mark(kind):
+    if kind == "permanent":
+        return "∞"
+    if kind == "temporary":
+        return "⏳"
+    if kind == "owner":
+        return "👁"
+    return ""
+
+
+def audience_people(body):
+    rows = body.get("people") if isinstance(body, dict) else None
+    out = []
+    for item in rows or []:
+        if not isinstance(item, dict):
+            continue
+        nick = clean_display_nick(item.get("nick"))
+        kind = str(item.get("kind") or "")
+        if not nick or kind not in ("owner", "temporary", "permanent"):
+            continue
+        out.append({"nick": nick, "kind": kind})
+    out.sort(key=lambda row: row["nick"].casefold())
+    return out
+
+
+def filter_audience(people, kind=""):
+    rows = []
+    for item in people or []:
+        if not isinstance(item, dict):
+            continue
+        row_kind = str(item.get("kind") or "")
+        if kind and row_kind != kind:
+            continue
+        nick = clean_display_nick(item.get("nick"))
+        if not nick:
+            continue
+        rows.append({"nick": nick, "kind": row_kind})
+    rows.sort(key=lambda row: row["nick"].casefold())
+    return rows
+
+
 def audience_status(viewers, guests, permanent=0):
     account, temporary, forever = audience_counts({
         "viewers": viewers, "guests": guests, "permanent": permanent,
@@ -372,9 +424,14 @@ def audience_status(viewers, guests, permanent=0):
 
 
 def fetch_viewers(host, nick, user, password):
+    viewers, guests, permanent, _people = fetch_audience(host, nick, user, password)
+    return viewers, guests, permanent
+
+
+def fetch_audience(host, nick, user, password):
     targets = notify_targets(host, "viewers")
     if not targets or not nick or not user or not password:
-        return 0, 0, 0
+        return 0, 0, 0, []
     payload = json.dumps({"name": nick, "user": user, "password": password}).encode("utf-8")
     for url in targets:
         request = urllib.request.Request(
@@ -386,10 +443,11 @@ def fetch_viewers(host, nick, user, password):
         try:
             with urllib.request.urlopen(request, timeout=3) as response:
                 body = json.loads(response.read().decode("utf-8", "replace"))
-            return audience_counts(body)
+            viewers, guests, permanent = audience_counts(body)
+            return viewers, guests, permanent, audience_people(body)
         except Exception:
             continue
-    return 0, 0, 0
+    return 0, 0, 0, []
 
 
 def post_share(host, nick, user, password, guests_temp, guests_perm):
@@ -1295,9 +1353,63 @@ def build_command(ffmpeg, mode, encoder, fps, monitor, output_idx, rtmp, with_au
     return command
 
 
-def build_mux_command(ffmpeg, pipe, relay, offset, rtmp):
-    """Copia a imagem já codificada e grava o som no mesmo horário, sem reescalar o vídeo."""
+REPLAY_SEGMENT_S = 2
+REPLAY_WRAP = 300
+
+
+def replay_folder():
+    return os.path.join(os.path.dirname(settings_path()), "replay")
+
+
+def prepare_replay_dir(folder):
+    os.makedirs(folder, exist_ok=True)
+    for name in os.listdir(folder):
+        if not name.endswith(".ts"):
+            continue
+        path = os.path.join(folder, name)
+        if os.path.isfile(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    return folder
+
+
+def list_replay_segments(folder):
+    if not folder or not os.path.isdir(folder):
+        return []
+    files = [
+        os.path.join(folder, name)
+        for name in os.listdir(folder)
+        if name.endswith(".ts") and os.path.isfile(os.path.join(folder, name))
+    ]
+    files.sort(key=lambda path: (os.path.getmtime(path), path))
+    return files
+
+
+def write_replay_concat(files, list_path):
+    with open(list_path, "w", encoding="utf-8") as handle:
+        for path in files:
+            escaped = os.path.abspath(path).replace("\\", "/").replace("'", r"'\''")
+            handle.write(f"file '{escaped}'\n")
+
+
+def build_replay_save_command(ffmpeg, list_path, dest):
     return [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel", "warning",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", list_path,
+        "-c", "copy",
+        dest,
+    ]
+
+
+def build_mux_command(ffmpeg, pipe, relay, offset, rtmp, replay_dir=None):
+    """Copia a imagem já codificada e grava o som no mesmo horário, sem reescalar o vídeo."""
+    command = [
         ffmpeg,
         "-hide_banner",
         "-loglevel", "warning",
@@ -1321,6 +1433,21 @@ def build_mux_command(ffmpeg, pipe, relay, offset, rtmp):
         "-flvflags", "no_duration_filesize",
         rtmp,
     ]
+    folder = str(replay_dir or "").strip()
+    if not folder:
+        return command
+    command.extend([
+        "-map", "0:a:0",
+        "-map", "1:v:0",
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "256k", "-ar", "48000", "-ac", "2",
+        "-f", "segment",
+        "-segment_time", str(REPLAY_SEGMENT_S),
+        "-segment_wrap", str(REPLAY_WRAP),
+        "-reset_timestamps", "1",
+        os.path.join(folder, "seg_%03d.ts"),
+    ])
+    return command
 
 
 def playback_label(name):
@@ -4574,6 +4701,10 @@ class App(QWidget):
         self._viewers_count = 0
         self._guests_count = 0
         self._permanent_count = 0
+        self._audience_people = []
+        self._audience_filter = ""
+        self._audience_dialog = None
+        self._replay_dir = None
         self._last_viewer_poll = 0.0
         self._hotkeys_installed = False
         self._window_feeder = None
@@ -5284,8 +5415,33 @@ class App(QWidget):
 
         self._content_layout.addStretch(1)
 
-        self.button = PillButton(self.content, "Transmitir", self.toggle, self.bg, self.accent, "#f6f1f1", height=40)
-        self._content_layout.addWidget(self.button)
+        actions = QWidget(self.content)
+        actions_row = QHBoxLayout(actions)
+        actions_row.setContentsMargins(0, 0, 0, 0)
+        actions_row.setSpacing(8)
+        self.replay_check = _CheckProxy("Guardar 10 min", actions)
+        self.replay_check.setFont(QFont("Segoe UI", 9))
+        self.replay_check.setChecked(False)
+        self.replay_check.setStyleSheet(check_style)
+        self.replay_check.setToolTip("Guardar os últimos 10 min (opcional). Só vale ao clicar em Transmitir.")
+        self.replay_save = QPushButton("Salvar clipe", actions)
+        self.replay_save.setFont(QFont("Segoe UI", 9))
+        self.replay_save.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.replay_save.setFixedHeight(40)
+        self.replay_save.setStyleSheet(
+            f"QPushButton {{ color: {self.fg}; background: {self.field}; border: 1px solid #484848; "
+            "border-radius: 20px; padding: 0 12px; }"
+        )
+        self.replay_save.clicked.connect(self._save_replay_clip)
+        self.audience_button = PillButton(
+            actions, "Espectadores", self._open_audience, self.bg, "#2a2a2a", self.fg, height=40
+        )
+        self.button = PillButton(actions, "Transmitir", self.toggle, self.bg, self.accent, "#f6f1f1", height=40)
+        actions_row.addWidget(self.replay_check)
+        actions_row.addWidget(self.replay_save)
+        actions_row.addWidget(self.audience_button, 1)
+        actions_row.addWidget(self.button, 2)
+        self._content_layout.addWidget(actions)
         self._sync_viewport()
 
     def _sync_viewport(self, w=None, h=None):
@@ -5595,6 +5751,110 @@ class App(QWidget):
             return
         self.set_status(self._compose_live_status())
 
+    def _open_audience(self):
+        dlg = getattr(self, "_audience_dialog", None)
+        if dlg is not None:
+            dlg.raise_()
+            dlg.activateWindow()
+            self._paint_audience_list()
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Espectadores")
+        dlg.setModal(False)
+        dlg.resize(300, 380)
+        root = QVBoxLayout(dlg)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
+        filters = QHBoxLayout()
+        self._audience_filter = ""
+        self._audience_filter_buttons = []
+        for label, kind in (("Todos", ""), ("👁", "owner"), ("⏳", "temporary"), ("∞", "permanent")):
+            button = QPushButton(label, dlg)
+            button.setCheckable(True)
+            button.setChecked(kind == "")
+            button.clicked.connect(lambda _checked=False, value=kind: self._set_audience_filter(value))
+            filters.addWidget(button)
+            self._audience_filter_buttons.append((button, kind))
+        root.addLayout(filters)
+        listing = QListWidget(dlg)
+        listing.setUniformItemSizes(True)
+        listing.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        listing.setMaximumHeight(10 * 28 + 8)
+        listing.setMinimumHeight(10 * 28 + 8)
+        root.addWidget(listing, 1)
+        empty = QLabel("Ninguém assistindo agora.", dlg)
+        empty.setWordWrap(True)
+        empty.setStyleSheet(f"color: {self.muted};")
+        root.addWidget(empty)
+        self._audience_list = listing
+        self._audience_empty = empty
+        self._audience_dialog = dlg
+        dlg.finished.connect(self._close_audience_dialog)
+        dlg.show()
+        self._paint_audience_list()
+
+    def _close_audience_dialog(self, _result=0):
+        self._audience_dialog = None
+        self._audience_list = None
+        self._audience_empty = None
+        self._audience_filter_buttons = []
+
+    def _set_audience_filter(self, kind):
+        self._audience_filter = kind
+        for button, value in getattr(self, "_audience_filter_buttons", []):
+            button.setChecked(value == kind)
+        self._paint_audience_list()
+
+    def _paint_audience_list(self):
+        listing = getattr(self, "_audience_list", None)
+        if listing is None:
+            return
+        rows = filter_audience(getattr(self, "_audience_people", []), getattr(self, "_audience_filter", ""))
+        listing.clear()
+        for row in rows:
+            mark = audience_kind_mark(row["kind"])
+            text = f"{row['nick']}  {mark}" if mark else row["nick"]
+            listing.addItem(QListWidgetItem(text))
+        empty = getattr(self, "_audience_empty", None)
+        if empty is not None:
+            empty.setVisible(len(rows) == 0)
+
+    def _save_replay_clip(self):
+        folder = getattr(self, "_replay_dir", None) or replay_folder()
+        files = list_replay_segments(folder)
+        if not files:
+            QMessageBox.information(self, "Spartan Live", "Ainda não tem trecho guardado. Marque a caixa e transmita.")
+            return
+        ffmpeg = existing_file("ffmpeg.exe")
+        if not ffmpeg:
+            QMessageBox.critical(self, "Spartan Live", "Não achei o ffmpeg neste programa.")
+            return
+        suggested = os.path.join(os.path.expanduser("~"), "Videos", "spartan-clipe.mp4")
+        dest, _kind = QFileDialog.getSaveFileName(self, "Salvar clipe", suggested, "Vídeo (*.mp4)")
+        if not dest:
+            return
+        list_path = os.path.join(folder, "concat.txt")
+        try:
+            write_replay_concat(files, list_path)
+        except OSError as error:
+            QMessageBox.critical(self, "Spartan Live", f"Não escrevi a lista do clipe: {error}")
+            return
+
+        def worker():
+            try:
+                subprocess.run(
+                    build_replay_save_command(ffmpeg, list_path, dest),
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                self.after(0, lambda: self.set_status("Clipe salvo."))
+            except Exception as error:
+                self.after(0, lambda: QMessageBox.critical(self, "Spartan Live", f"Não salvei o clipe: {error}"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _gain_changed(self):
         try:
             self.save_settings()
@@ -5633,18 +5893,21 @@ class App(QWidget):
 
     def _poll_viewers_worker(self, host, nick, user, password):
         # Não reenvia share aqui: um POST atrasado apagava o permanente com estado velho.
-        viewers, guests, permanent = fetch_viewers(host, nick, user, password)
+        viewers, guests, permanent, people = fetch_audience(host, nick, user, password)
         if not self.running or self.stopping or self.live_nick != nick:
             return
         if (
             viewers != self._viewers_count
             or guests != self._guests_count
             or permanent != self._permanent_count
+            or people != self._audience_people
         ):
             self._viewers_count = viewers
             self._guests_count = guests
             self._permanent_count = permanent
+            self._audience_people = people
             self.after(0, self._refresh_live_status)
+            self.after(0, self._paint_audience_list)
 
     def _current_window_geom(self):
         if getattr(self, "_maximized", False) and getattr(self, "_restore_geom", None):
@@ -5716,6 +5979,15 @@ class App(QWidget):
         self.save_settings()
         self.running = True
         self.stopping = False
+        replay_dir = None
+        if hasattr(self, "replay_check") and self.replay_check.isChecked():
+            try:
+                replay_dir = prepare_replay_dir(replay_folder())
+            except OSError:
+                QMessageBox.warning(self, "Spartan Live", "Não deu para criar a pasta do clipe. A live segue sem gravar.")
+        self._replay_dir = replay_dir
+        if hasattr(self, "replay_check"):
+            self.replay_check.setEnabled(False)
         self.button.config(text="Parar")
         self.set_status("Preparando a captura...")
         output_idx = self.selected_monitor()
@@ -6349,7 +6621,13 @@ class App(QWidget):
         live_audio.attach(lambda: time.time() - started_at)
         log_event("som na ordem da captura")
         try:
-            mux = self._spawn(build_mux_command(video_command[0], pipe_name, relay, 0.0, rtmp), subprocess.DEVNULL)
+            mux = self._spawn(
+                build_mux_command(
+                    video_command[0], pipe_name, relay, 0.0, rtmp,
+                    replay_dir=getattr(self, "_replay_dir", None),
+                ),
+                subprocess.DEVNULL,
+            )
         except OSError as error:
             self._kill_ffmpeg()
             live_audio.detach()
@@ -6530,6 +6808,8 @@ class App(QWidget):
         self.running = False
         self.proc = None
         self.video_proc = None
+        if hasattr(self, "replay_check"):
+            self.replay_check.setEnabled(True)
         self.button.config(text="Transmitir")
         message = explain_error(text)
         self.set_status(message)
@@ -6631,6 +6911,7 @@ class App(QWidget):
         self._viewers_count = 0
         self._guests_count = 0
         self._permanent_count = 0
+        self._audience_people = []
         self._signal_stop()
         self.stopping = True
         self.running = False
@@ -6638,8 +6919,11 @@ class App(QWidget):
         self._kill_ffmpeg()
         self.proc = None
         self.video_proc = None
+        if hasattr(self, "replay_check"):
+            self.replay_check.setEnabled(True)
         self.button.config(text="Transmitir")
         self.set_status("Parado.")
+        self._paint_audience_list()
 
 
 def main():

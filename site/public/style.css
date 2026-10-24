@@ -173,6 +173,9 @@ header {
 }
 
 body[data-guest="1"] #guest-generate,
+body[data-guest="1"] #audience-open,
+body[data-guest="1"] #audience-pop,
+body[data-guest="1"] #guest-warn,
 body[data-guest="1"] #guest-hours,
 body[data-guest="1"] #guest-permanent,
 body[data-guest="1"] #guest-temporary,
@@ -189,6 +192,7 @@ body[data-guest="1"] #guest-viewer-status:not(.hidden) {
 }
 
 #guest-generate,
+#audience-open,
 #guest-hours button,
 #guest-revoke,
 #guest-perm-revoke,
@@ -204,12 +208,18 @@ body[data-guest="1"] #guest-viewer-status:not(.hidden) {
 }
 
 #guest-generate,
+#audience-open,
 #guest-hours button,
 #guest-revoke,
 #guest-perm-revoke {
   color: var(--text);
   background: transparent;
   border: 1px solid var(--line);
+}
+
+.guest-warn {
+  color: #f0c36d;
+  font-size: 13px;
 }
 
 #guest-clock,
@@ -266,6 +276,77 @@ body[data-guest="1"] #guest-viewer-status:not(.hidden) {
 }
 
 #guest-revoke-ask.hidden { display: none; }
+
+#audience-pop {
+  position: fixed;
+  inset: 0;
+  z-index: 75;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+#audience-pop.hidden { display: none; }
+
+.audience-card {
+  width: min(460px, 100%);
+  max-height: min(70vh, 560px);
+  padding: 22px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.audience-card h2 {
+  margin: 0;
+  font-size: 22px;
+}
+
+#audience-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+#audience-list button,
+#audience-list li {
+  width: 100%;
+  text-align: left;
+  color: var(--text);
+  background: #101010;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 15px;
+}
+
+#audience-list button:hover {
+  border-color: var(--accent);
+}
+
+.audience-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.audience-actions button {
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 8px;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--line);
+}
 
 .guest-revoke-card {
   width: min(420px, 100%);

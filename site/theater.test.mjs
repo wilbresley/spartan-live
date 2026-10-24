@@ -17,6 +17,7 @@ import {
   holdToast,
   dropViewer,
   enqueueArrivalToasts,
+  listRoster,
   pickNextGif,
   pairStacks,
   readPeerVolume,
@@ -29,6 +30,7 @@ import {
   theaterAfterToggle,
   theaterHeaderVisible,
   tickToastQueue,
+  touchRoster,
   touchViewer,
 } from "./public/theater.mjs";
 
@@ -148,11 +150,21 @@ test("contador de espectadores soma quem está assistindo, remove na hora ao pau
   assert.equal(countViewers(book, "Bresley", 7000, 4500), 0);
 });
 
+test("lista nomeada de espectadores ordena pelo apelido e expira no mesmo prazo do contador", () => {
+  const book = new Map();
+  touchRoster(book, "Bresley", "v2", "Renato", "temporary", 1000);
+  touchRoster(book, "Bresley", "v1", "Adi", "owner", 1000);
+  assert.deepEqual(listRoster(book, "Bresley", 2000, 4500).map((row) => row.nick), ["Adi", "Renato"]);
+  dropViewer(book, "Bresley", "v1");
+  assert.deepEqual(listRoster(book, "Bresley", 2000, 4500), [{ nick: "Renato", kind: "temporary" }]);
+  assert.deepEqual(listRoster(book, "Bresley", 6000, 4500), []);
+});
+
 test("roleta de gifs de triste e feliz percorre todos os itens sem repetir até fechar o ciclo", () => {
   assert.equal(SAD_GIFS.length, 12);
   assert.equal(HAPPY_GIFS.length, 12);
-  assert.ok(SAD_GIFS.every((src) => /^\/gifs\/sad-\d+\.gif\?v3$/.test(src)));
-  assert.ok(HAPPY_GIFS.every((src) => /^\/gifs\/happy-\d+\.gif\?v3$/.test(src)));
+  assert.ok(SAD_GIFS.every((src) => /^\/gifs\/sad-\d+\.gif\?v5$/.test(src)));
+  assert.ok(HAPPY_GIFS.every((src) => /^\/gifs\/happy-\d+\.gif\?v5$/.test(src)));
   assert.ok(!SAD_GIFS.some((src) => src.includes("empty-sad")));
 
   let idx = -1;

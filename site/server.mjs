@@ -5,7 +5,8 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { loadPassword, savePassword, verifyPassword } from "./password.mjs";
-import { countViewers, dropViewer, touchViewer, SAD_GIFS } from "./public/theater.mjs";
+import { countViewers, dropViewer, listRoster, touchRoster, touchViewer, SAD_GIFS } from "./public/theater.mjs";
+import { cleanNick } from "./public/nick-tag.mjs";
 import {
   ACCESS_OWNER,
   ACCESS_PERM,
@@ -53,6 +54,7 @@ const switchingUntil = new Map();
 const viewersByStream = new Map();
 const guestsByStream = new Map();
 const permanentGuestsByStream = new Map();
+const rosterByStream = new Map();
 const shareByStream = new Map();
 let passwordRecord = null;
 
@@ -236,6 +238,7 @@ const STATIC = {
   "/quick-return.mjs": { file: "quick-return.mjs", type: "text/javascript; charset=utf-8", cache: "no-cache" },
   "/theater.mjs": { file: "theater.mjs", type: "text/javascript; charset=utf-8", cache: "no-cache" },
   "/guest-link.mjs": { file: "guest-link.mjs", type: "text/javascript; charset=utf-8", cache: "no-cache" },
+  "/nick-tag.mjs": { file: "nick-tag.mjs", type: "text/javascript; charset=utf-8", cache: "no-cache" },
   "/style.css": { file: "style.css", type: "text/css; charset=utf-8", cache: "no-cache" },
   "/entrar.mp3": { file: "entrar.mp3", type: "audio/mpeg", cache: "public, max-age=86400" },
   "/sair.mp3": { file: "sair.mp3", type: "audio/mpeg", cache: "public, max-age=86400" },
@@ -797,6 +800,7 @@ async function handle(req, res) {
       viewers: countViewers(viewersByStream, name),
       guests: countViewers(guestsByStream, name),
       permanent: countViewers(permanentGuestsByStream, name),
+      people: listRoster(rosterByStream, name),
     });
     return;
   }
@@ -971,9 +975,14 @@ async function handle(req, res) {
   if (req.method === "POST" && pathname === "/api/watch") {
     if (needsLogin()) return;
     const body = await readJson(req);
+    const nick = cleanNick(body.nick);
+    if (!nick) {
+      sendJson(res, 400, { error: "apelido obrigatorio" });
+      return;
+    }
     const names = Array.isArray(body.names) ? body.names : [];
     const accessId = accessIdOf(session);
-    const kind = accessId === ACCESS_PERM ? "permanent" : (accessId === ACCESS_TEMP ? "temporary" : "");
+    const kind = accessId === ACCESS_PERM ? "permanent" : (accessId === ACCESS_TEMP ? "temporary" : (guest ? "temporary" : "owner"));
     const viewerKey = watcherKey(req, guest, kind);
     const now = Date.now();
     const book = accessId === ACCESS_OWNER
@@ -981,7 +990,10 @@ async function handle(req, res) {
       : (accessId === ACCESS_PERM ? permanentGuestsByStream : guestsByStream);
     for (const raw of names) {
       const name = String(raw || "");
-      if (safeStreamName(name) && guestMaySee(session, name)) touchViewer(book, name, viewerKey, now);
+      if (safeStreamName(name) && guestMaySee(session, name)) {
+        touchViewer(book, name, viewerKey, now);
+        touchRoster(rosterByStream, name, viewerKey, nick, kind, now);
+      }
     }
     sendJson(res, 200, { ok: true });
     return;
@@ -998,8 +1010,37 @@ async function handle(req, res) {
       dropViewer(viewersByStream, name, viewerKey);
       dropViewer(guestsByStream, name, viewerKey);
       dropViewer(permanentGuestsByStream, name, viewerKey);
+      dropViewer(rosterByStream, name, viewerKey);
     }
     sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  if (req.method === "GET" && pathname === "/api/audience") {
+    if (needsLogin()) return;
+    if (guest) {
+      sendJson(res, 401, { error: "sem sessao" });
+      return;
+    }
+    const now = Date.now();
+    const names = new Set();
+    try {
+      for (const stream of await listStreams()) names.add(stream.name);
+    } catch { /* motor fora: ainda lista quem está pingando */ }
+    for (const book of [viewersByStream, guestsByStream, permanentGuestsByStream, rosterByStream]) {
+      for (const name of book.keys()) names.add(name);
+    }
+    const lives = [...names]
+      .filter((name) => safeStreamName(name))
+      .sort((a, b) => a.localeCompare(b, "pt-BR"))
+      .map((name) => ({
+        name,
+        viewers: countViewers(viewersByStream, name, now),
+        guests: countViewers(guestsByStream, name, now),
+        permanent: countViewers(permanentGuestsByStream, name, now),
+        people: listRoster(rosterByStream, name, now),
+      }));
+    sendJson(res, 200, { lives });
     return;
   }
 

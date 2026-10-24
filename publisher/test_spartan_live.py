@@ -24,7 +24,12 @@ from spartan_live import (
     _WGCWindowGrabber,
     reap_retired,
     audience_counts,
+    audience_kind_mark,
+    audience_people,
     audience_status,
+    build_replay_save_command,
+    clean_display_nick,
+    filter_audience,
     apply_startup,
     build_command,
     build_mux_command,
@@ -86,6 +91,26 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(audience_status(0, 3, 0), ["👁 0 assistindo", "⏳ 3 pelo link", "∞ 0 permanente"])
         self.assertEqual(audience_status(1, 4, 2), ["👁 1 assistindo", "⏳ 4 pelo link", "∞ 2 permanente"])
         self.assertEqual(audience_status(0, 0, 0), [])
+        self.assertEqual(clean_display_nick("  João  "), "João")
+        self.assertEqual(clean_display_nick("A"), "")
+        self.assertEqual(clean_display_nick("ok<script>"), "")
+        self.assertEqual(audience_kind_mark("owner"), "👁")
+        self.assertEqual(audience_kind_mark("temporary"), "⏳")
+        self.assertEqual(audience_kind_mark("permanent"), "∞")
+        people = audience_people({
+            "viewers": 2,
+            "people": [
+                {"nick": "Renato", "kind": "temporary"},
+                {"nick": "Adi", "kind": "owner"},
+                {"nick": "x", "kind": "owner"},
+                {"nick": "Hack", "kind": "nope"},
+            ],
+        })
+        self.assertEqual([row["nick"] for row in people], ["Adi", "Renato"])
+        self.assertEqual(
+            [row["nick"] for row in filter_audience(people, "owner")],
+            ["Adi"],
+        )
 
     def test_sessao_de_janela_fecha_sem_estar_aberta(self):
         grabber = _WGCWindowGrabber(0)
@@ -327,6 +352,22 @@ class PublisherTests(unittest.TestCase):
         self.assertNotIn("aresample", mux)
         self.assertNotIn("cfr", mux)
         self.assertEqual(mux[-1], "rtmp://servidor/nick")
+        gold = list(mux)
+        with_replay = build_mux_command(
+            "ffmpeg.exe", r"\\.\pipe\spartan-live-test", relay, 0.085, "rtmp://servidor/nick",
+            replay_dir=r"C:\replay",
+        )
+        self.assertEqual(with_replay[:len(gold)], gold)
+        self.assertIn("rtmp://servidor/nick", with_replay)
+        self.assertIn("-segment_wrap", with_replay)
+        self.assertIn("300", with_replay)
+        self.assertNotIn("aresample", with_replay)
+        self.assertNotIn("cfr", with_replay)
+        self.assertTrue(with_replay[-1].endswith("seg_%03d.ts"))
+        save = build_replay_save_command("ffmpeg.exe", r"C:\replay\concat.txt", r"C:\Videos\clipe.mp4")
+        self.assertEqual(save[0], "ffmpeg.exe")
+        self.assertIn("concat", save)
+        self.assertEqual(save[-1], r"C:\Videos\clipe.mp4")
         self.assertEqual(video_clock("Duration: N/A, start: 1791758504.670458, bitrate: 1"), 1791758504.670458)
         self.assertIsNone(video_clock("start: 0.000000"))
         self.assertEqual(wav_header()[:4], b"RIFF")
@@ -719,6 +760,10 @@ class PublisherTests(unittest.TestCase):
             self.assertTrue(hasattr(app, "share_perm_check"))
             self.assertFalse(app.share_temp_check.isChecked())
             self.assertFalse(app.share_perm_check.isChecked())
+            self.assertTrue(hasattr(app, "audience_button"))
+            self.assertEqual(app.audience_button.label, "Espectadores")
+            self.assertTrue(hasattr(app, "replay_check"))
+            self.assertFalse(app.replay_check.isChecked())
             sent = []
 
             def capture(host, nick, user, password, guests_temp, guests_perm):
