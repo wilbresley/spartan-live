@@ -21,6 +21,7 @@ body {
   background: var(--bg);
   color: var(--text);
   user-select: none;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
 }
 
 input, textarea { user-select: text; }
@@ -110,12 +111,14 @@ header {
   gap: 12px;
   padding: clamp(8px, 1.5vh, 18px) clamp(10px, 1.4vw, 20px) 0;
   flex: 0 0 auto;
+  min-width: 0;
 }
 
 .brand {
   display: flex;
   align-items: center;
   gap: 12px;
+  min-width: 0;
 }
 
 .brand-mark,
@@ -162,6 +165,42 @@ header {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex: 0 0 auto;
+}
+
+body.header-compact .brand strong { display: none; }
+
+@media (max-width: 720px) {
+  header,
+  .header-actions,
+  #guest-tools {
+    flex-wrap: wrap;
+  }
+}
+
+#header-overflow:empty { display: none; }
+
+body.header-compact #header-overflow {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 0 0 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+body.header-compact #header-overflow #guest-tools,
+body.header-compact #header-overflow #guest-hours,
+body.header-compact #header-overflow .guest-slot {
+  flex-wrap: wrap;
+  width: 100%;
+}
+
+body.header-compact #header-overflow #theater-toggle,
+body.header-compact #header-overflow #grid-fullscreen,
+body.header-compact #header-overflow #logout {
+  width: 100%;
+  height: 40px;
 }
 
 #guest-tools,
@@ -426,12 +465,18 @@ body[data-guest="1"] #guest-viewer-status:not(.hidden) {
 
 .settings-pop {
   position: fixed;
-  z-index: 20;
+  z-index: 30;
   width: min(240px, calc(100vw - 16px));
   padding: 10px;
   background: #171717;
   border: 1px solid var(--line);
   border-radius: 12px;
+}
+
+body.header-compact .settings-pop {
+  width: min(320px, calc(100vw - 16px));
+  max-height: min(70dvh, calc(100dvh - 72px));
+  overflow: auto;
 }
 
 .settings-pop form {
@@ -505,6 +550,10 @@ body[data-guest="1"] #guest-viewer-status:not(.hidden) {
 }
 
 #rail-wrap.is-open { width: clamp(160px, 16vw, 220px); }
+
+body.header-compact #rail-wrap.is-open {
+  width: min(220px, 42vw);
+}
 
 #rail-wrap:not(.is-open) .rail-head {
   margin: 10px;
@@ -668,6 +717,10 @@ body[data-guest="1"] #guest-viewer-status:not(.hidden) {
   transition: transform 0.18s ease, opacity 0.18s ease;
 }
 
+#app-view.theater-mode header .settings-pop:not(.hidden) {
+  pointer-events: auto;
+}
+
 #app-view.theater-mode.theater-peek header {
   transform: translateY(0);
   opacity: 1;
@@ -676,6 +729,32 @@ body[data-guest="1"] #guest-viewer-status:not(.hidden) {
 
 #app-view.theater-mode #rail-wrap { display: none; }
 #app-view.theater-mode #video-container { margin: 4px; }
+
+#theater-exit {
+  display: none;
+  position: fixed;
+  z-index: 28;
+  top: max(12px, env(safe-area-inset-top));
+  left: 50%;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  color: #f6f1f1;
+  background: rgba(20, 20, 20, 0.86);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  transform: translateX(-50%);
+  font-size: 20px;
+}
+
+@media (hover: none), (pointer: coarse) {
+  #app-view.theater-mode #theater-exit { display: grid; place-items: center; }
+}
+
+body.header-compact #app-view.theater-mode #theater-exit {
+  display: grid;
+  place-items: center;
+}
 
 body.tab-hidden .rail-dot,
 body.tab-hidden .live-led .led {
@@ -762,7 +841,7 @@ body.tab-hidden .live-led .led {
   display: none;
   position: absolute;
   z-index: 5;
-  top: 48px;
+  top: max(48px, env(safe-area-inset-top));
   left: 50%;
   width: 42px;
   height: 42px;
@@ -902,11 +981,18 @@ body.tab-hidden .live-led .led {
   transition: opacity 0.16s ease;
 }
 
-.peer:hover .peer-actions,
-.peer:hover .player-bar,
+@media (hover: hover) and (pointer: fine) {
+  .peer:hover .peer-actions,
+  .peer:hover .player-bar {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
 .peer.show-chrome .peer-actions,
 .peer.show-chrome .player-bar,
 .peer.paused .player-bar,
+.peer:has(.vol.is-open) .player-bar,
 .peer:fullscreen.fs-hot .peer-actions,
 .peer:fullscreen.fs-hot .player-bar {
   opacity: 1;
@@ -1066,8 +1152,11 @@ body.tab-hidden .live-led .led {
   background: rgba(20, 20, 20, 0.88);
 }
 
-.vol:hover .vol-pop,
-.vol:focus-within .vol-pop,
+@media (hover: hover) and (pointer: fine) {
+  .vol:hover .vol-pop,
+  .vol:focus-within .vol-pop { display: flex; }
+}
+
 .vol.is-open .vol-pop { display: flex; }
 
 .vol-readout {
@@ -1141,7 +1230,7 @@ body.tab-hidden .live-led .led {
 
 .fs-exit {
   display: none;
-  top: 48px;
+  top: max(48px, env(safe-area-inset-top));
   left: 50%;
   transform: translateX(-50%);
   font-size: 20px;

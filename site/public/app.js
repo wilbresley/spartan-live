@@ -18,8 +18,12 @@ import {
   dismissActiveToast,
   holdToast,
   enqueueArrivalToasts,
+  fullscreenExitLingerMs,
+  HEADER_COMPACT_PX,
+  headerShouldCompact,
   pickNextGif,
   pairStacks,
+  pointerHasHover,
   readPeerVolume,
   savePeerVolume,
   shouldUseArrivalToast,
@@ -28,8 +32,11 @@ import {
   theaterAfterMove,
   theaterAfterTick,
   theaterAfterToggle,
+  theaterAutoIdleMs,
   theaterHeaderVisible,
+  theaterHoldPeek,
   tickToastQueue,
+  volumeTapAction,
 } from "./theater.mjs";
 
 const loginView = document.querySelector("#login-view");
@@ -41,6 +48,9 @@ const passwordForm = document.querySelector("#password-form");
 const passwordError = document.querySelector("#password-error");
 const settingsButton = document.querySelector("#settings");
 const settingsPop = document.querySelector("#settings-pop");
+const headerActions = document.querySelector(".header-actions");
+const headerOverflow = document.querySelector("#header-overflow");
+const guestTools = document.querySelector("#guest-tools");
 const videoContainer = document.querySelector("#video-container");
 const railWrap = document.querySelector("#rail-wrap");
 const railToggle = document.querySelector("#rail-toggle");
@@ -53,6 +63,8 @@ const emptyText = document.querySelector("#empty-text");
 const count = document.querySelector("#count");
 const logoutButton = document.querySelector("#logout");
 const theaterButton = document.querySelector("#theater-toggle");
+const theaterExit = document.querySelector("#theater-exit");
+const gridButton = document.querySelector("#grid-fullscreen");
 const guestGenerate = document.querySelector("#guest-generate");
 const audienceOpen = document.querySelector("#audience-open");
 const audiencePop = document.querySelector("#audience-pop");
@@ -79,6 +91,27 @@ const guestViewerStatus = document.querySelector("#guest-viewer-status");
 const guestGone = document.querySelector("#guest-gone");
 const guestGoneGif = document.querySelector("#guest-gone-gif");
 const gridNamesButton = document.querySelector("#grid-names");
+
+function pointerCanHover() {
+  return pointerHasHover(
+    window.matchMedia("(hover: hover)").matches ? "hover" : "none",
+    window.matchMedia("(pointer: fine)").matches ? "fine" : "coarse",
+  );
+}
+
+function packHeader() {
+  const compact = headerShouldCompact(window.innerWidth, HEADER_COMPACT_PX);
+  document.body.classList.toggle("header-compact", compact);
+  if (!headerActions || !headerOverflow || !guestTools || !theaterButton || !gridButton || !logoutButton || !settingsButton) return;
+  if (compact) {
+    headerOverflow.append(guestTools, theaterButton, gridButton, logoutButton);
+    return;
+  }
+  headerActions.insertBefore(guestTools, settingsButton);
+  headerActions.insertBefore(theaterButton, settingsButton);
+  headerActions.insertBefore(gridButton, settingsButton);
+  headerActions.append(logoutButton);
+}
 
 const SAD_INDEX_KEY = "spartan-live-sad-gif-idx";
 const HAPPY_INDEX_KEY = "spartan-live-happy-gif-idx";
@@ -978,7 +1011,14 @@ function rememberRail() {
 }
 
 railToggle.addEventListener("click", () => {
-  if (!visualRailOpen(railState, { forceOpen: railForceOpen() }) && !railForceOpen()) return;
+  const open = visualRailOpen(railState, { forceOpen: railForceOpen() });
+  if (!pointerCanHover()) {
+    railState = railAfterPinToggle(railState);
+    rememberRail();
+    paintRail();
+    return;
+  }
+  if (!open && !railForceOpen()) return;
   railState = railAfterPinToggle(railState);
   rememberRail();
   paintRail();
@@ -986,11 +1026,13 @@ railToggle.addEventListener("click", () => {
 
 if (railWrap) {
   railWrap.addEventListener("pointerenter", () => {
+    if (!pointerCanHover()) return;
     if (arrivalToastOpenNow()) return;
     railState = railAfterHover(railState, true);
     paintRail();
   });
   railWrap.addEventListener("pointerleave", () => {
+    if (!pointerCanHover()) return;
     railState = railAfterHover(railState, false);
     paintRail();
   });
@@ -1004,6 +1046,15 @@ function noteRailEmpty() {
 }
 
 paintRail();
+packHeader();
+window.addEventListener("resize", () => {
+  packHeader();
+  if (!settingsPop.classList.contains("hidden")) placeSettings();
+});
+window.matchMedia(`(max-width: ${HEADER_COMPACT_PX}px)`).addEventListener("change", () => {
+  packHeader();
+  if (!settingsPop.classList.contains("hidden")) placeSettings();
+});
 
 function toggleWatch(name) {
   if (peers.has(name)) removeStream(name);
@@ -1154,10 +1205,12 @@ function addStream(stream) {
   volume.append(pop, volumeButton);
   let hideVolTimer = 0;
   volume.addEventListener("pointerenter", () => {
+    if (!pointerCanHover()) return;
     window.clearTimeout(hideVolTimer);
     volume.classList.add("is-open");
   });
   volume.addEventListener("pointerleave", () => {
+    if (!pointerCanHover()) return;
     window.clearTimeout(hideVolTimer);
     hideVolTimer = window.setTimeout(() => {
       if (volume.matches(":hover")) return;
@@ -1194,7 +1247,9 @@ function addStream(stream) {
     if (document.fullscreenElement !== el) return;
     el.classList.add("fs-hot");
     window.clearTimeout(hideExit);
-    hideExit = window.setTimeout(() => el.classList.remove("fs-hot"), 1400);
+    const linger = fullscreenExitLingerMs(pointerCanHover());
+    if (!linger) return;
+    hideExit = window.setTimeout(() => el.classList.remove("fs-hot"), linger);
   }
   const initialVol = readPeerVolume(peerVolumes, stream.name);
   let savedVolume = initialVol.step || 100;
@@ -1359,7 +1414,11 @@ function addStream(stream) {
     resumePlayback();
   });
   liveButton.addEventListener("click", goLive);
-  volumeButton.addEventListener("click", () => {
+  volumeButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const action = volumeTapAction(pointerCanHover(), volume.classList.contains("is-open"));
+    volume.classList.toggle("is-open", action.open);
+    if (!action.mute) return;
     if (video.muted || video.volume === 0) {
       applyVolume(savedVolume || 100);
       video.play().catch(() => {});
@@ -1446,10 +1505,12 @@ function addStream(stream) {
     if (document.fullscreenElement) document.exitFullscreen();
   });
   el.addEventListener("mousemove", showExit);
-  el.addEventListener("pointerdown", () => {
+  el.addEventListener("pointerdown", (event) => {
     el.classList.add("show-chrome");
     window.clearTimeout(el._hideChrome);
     el._hideChrome = window.setTimeout(() => el.classList.remove("show-chrome"), 2800);
+    if (!volume.contains(event.target)) volume.classList.remove("is-open");
+    if (document.fullscreenElement === el) showExit();
   });
   el.addEventListener("fullscreenchange", () => {
     if (document.fullscreenElement === el) showExit();
@@ -1845,17 +1906,18 @@ function activeKeyboardPeer() {
   return list.length === 1 ? list[0] : list[0] || null;
 }
 
+function settingsMenuOpen() {
+  return Boolean(settingsPop && !settingsPop.classList.contains("hidden"));
+}
+
 function paintTheater() {
   const on = theaterActive(theaterState);
-  const peek = theaterHeaderVisible(theaterState);
+  const peek = theaterHeaderVisible(theaterState) || (on && settingsMenuOpen());
   appView.classList.toggle("theater-mode", on);
   appView.classList.toggle("theater-peek", on && peek);
   if (theaterButton) {
     theaterButton.classList.toggle("is-on", on);
     theaterButton.setAttribute("aria-pressed", on ? "true" : "false");
-  }
-  if (on && !settingsPop.classList.contains("hidden") && !peek) {
-    settingsPop.classList.add("hidden");
   }
 }
 
@@ -1867,9 +1929,17 @@ if (theaterButton) {
   });
 }
 
-document.addEventListener("mousemove", (event) => {
-  if (appView.classList.contains("hidden") || arrivalToastOpenNow()) return;
-  const next = theaterAfterMove(theaterState, event.clientY, Date.now(), 58);
+if (theaterExit) {
+  theaterExit.addEventListener("click", (event) => {
+    event.stopPropagation();
+    theaterState = theaterAfterEscape(theaterState, Date.now());
+    paintTheater();
+  });
+}
+
+function applyTheaterPointer(y) {
+  let next = theaterAfterMove(theaterState, y, Date.now(), 58);
+  next = theaterHoldPeek(next, settingsMenuOpen());
   if (
     next.manual !== theaterState.manual ||
     next.auto !== theaterState.auto ||
@@ -1880,11 +1950,31 @@ document.addEventListener("mousemove", (event) => {
   } else {
     theaterState = next;
   }
+}
+
+document.addEventListener("mousemove", (event) => {
+  if (appView.classList.contains("hidden") || arrivalToastOpenNow()) return;
+  applyTheaterPointer(event.clientY);
+});
+
+document.addEventListener("pointerdown", (event) => {
+  if (!pointerCanHover()) {
+    for (const peer of peers.values()) {
+      const vol = peer.el?.querySelector(".vol");
+      if (vol && !vol.contains(event.target)) vol.classList.remove("is-open");
+    }
+  }
+  if (pointerCanHover()) return;
+  if (appView.classList.contains("hidden") || arrivalToastOpenNow()) return;
+  if (!theaterActive(theaterState)) return;
+  if (theaterExit && (event.target === theaterExit || theaterExit.contains(event.target))) return;
+  if (settingsMenuOpen() && settingsPop.contains(event.target)) return;
+  applyTheaterPointer(event.clientY);
 });
 
 window.setInterval(() => {
   if (appView.classList.contains("hidden") || arrivalToastOpenNow()) return;
-  const next = theaterAfterTick(theaterState, anyPlayingPeer(), Date.now());
+  const next = theaterAfterTick(theaterState, anyPlayingPeer(), Date.now(), theaterAutoIdleMs(pointerCanHover()));
   if (next.auto !== theaterState.auto || next.manual !== theaterState.manual) {
     theaterState = next;
     paintTheater();
@@ -1985,7 +2075,8 @@ passwordForm.addEventListener("submit", async (event) => {
 
 function placeSettings() {
   const rect = settingsButton.getBoundingClientRect();
-  const width = Math.min(240, window.innerWidth - 16);
+  const compact = headerShouldCompact(window.innerWidth, HEADER_COMPACT_PX);
+  const width = Math.min(compact ? 320 : 240, window.innerWidth - 16);
   const top = Math.min(rect.bottom + 8, window.innerHeight - 8);
   settingsPop.style.position = "fixed";
   settingsPop.style.width = `${width}px`;
@@ -1999,13 +2090,20 @@ settingsButton.addEventListener("click", (event) => {
   const opening = settingsPop.classList.contains("hidden");
   settingsPop.classList.toggle("hidden");
   if (opening) {
+    if (theaterActive(theaterState)) {
+      theaterState = theaterHoldPeek(theaterState, true);
+    }
     placeSettings();
     paintChimeButton();
     paintGridNamesButton();
+    paintTheater();
   }
 });
+if (settingsPop) {
+  settingsPop.addEventListener("pointerdown", (event) => event.stopPropagation());
+  settingsPop.addEventListener("click", (event) => event.stopPropagation());
+}
 
-const gridButton = document.querySelector("#grid-fullscreen");
 const gridExit = document.querySelector("#grid-exit");
 let hideGridExit = 0;
 function showGridExit() {
@@ -2013,7 +2111,9 @@ function showGridExit() {
   if (document.fullscreenElement !== videoContainer) return;
   videoContainer.classList.add("grid-hot");
   window.clearTimeout(hideGridExit);
-  hideGridExit = window.setTimeout(() => videoContainer.classList.remove("grid-hot"), 1400);
+  const linger = fullscreenExitLingerMs(pointerCanHover());
+  if (!linger) return;
+  hideGridExit = window.setTimeout(() => videoContainer.classList.remove("grid-hot"), linger);
 }
 gridButton.addEventListener("click", () => {
   if (visibleCount() === 0) return;
@@ -2021,12 +2121,14 @@ gridButton.addEventListener("click", () => {
     document.exitFullscreen();
     return;
   }
+  settingsPop.classList.add("hidden");
   videoContainer.requestFullscreen().catch(() => {});
 });
 gridExit.addEventListener("click", () => {
   if (document.fullscreenElement === videoContainer) document.exitFullscreen();
 });
 videoContainer.addEventListener("mousemove", showGridExit);
+videoContainer.addEventListener("pointerdown", showGridExit);
 videoContainer.addEventListener("fullscreenchange", () => {
   if (document.fullscreenElement === videoContainer) showGridExit();
   else videoContainer.classList.remove("grid-hot");

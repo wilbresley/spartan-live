@@ -2,7 +2,7 @@
 <html lang="pt-BR">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Spartan Live</title>
   <link rel="icon" href="/spartan-live.png" type="image/png">
   <link rel="stylesheet" href="/style.css">
@@ -72,6 +72,7 @@
         <button id="grid-fullscreen" type="button" title="Tela cheia do grid" aria-label="Tela cheia do grid">⛶</button>
         <button id="settings" type="button" aria-label="Ajustes">⚙</button>
         <div id="settings-pop" class="settings-pop hidden">
+          <div id="header-overflow"></div>
           <button id="chimes" type="button">Sons de entrada: ligados</button>
           <button id="grid-names" type="button">Ocultar nomes no grid</button>
           <form id="gear-password">
@@ -89,6 +90,7 @@
         <button id="logout" type="button">Sair</button>
       </div>
     </header>
+    <button id="theater-exit" type="button" aria-label="Sair do modo teatro">✕</button>
     <div id="workspace">
       <aside id="rail-wrap">
         <div class="rail-head">

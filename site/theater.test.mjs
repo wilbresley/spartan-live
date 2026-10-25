@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   HAPPY_GIFS,
+  HEADER_COMPACT_PX,
   MAX_SAVED_VOLUME_STEP,
   MAX_VOLUME_STEP,
   SAD_GIFS,
@@ -17,9 +18,12 @@ import {
   holdToast,
   dropViewer,
   enqueueArrivalToasts,
+  fullscreenExitLingerMs,
+  headerShouldCompact,
   listRoster,
   pickNextGif,
   pairStacks,
+  pointerHasHover,
   readPeerVolume,
   savePeerVolume,
   shouldUseArrivalToast,
@@ -28,10 +32,13 @@ import {
   theaterAfterMove,
   theaterAfterTick,
   theaterAfterToggle,
+  theaterAutoIdleMs,
   theaterHeaderVisible,
+  theaterHoldPeek,
   tickToastQueue,
   touchRoster,
   touchViewer,
+  volumeTapAction,
 } from "./public/theater.mjs";
 
 test("modo teatro automático entra após 30 segundos com live tocando e sai ao mexer o mouse", () => {
@@ -64,6 +71,19 @@ test("modo teatro manual ativa na hora, mostra topo ao encostar em cima e sai co
 
   state = theaterAfterEscape(state, 8000);
   assert.equal(theaterActive(state), false);
+  assert.equal(theaterHeaderVisible(state), true);
+});
+
+test("menu da engrenagem aberto segura o topo do teatro para o botão vermelho receber o clique", () => {
+  let state = theaterAfterToggle(createTheaterState(), 1000);
+  state = theaterAfterMove(state, 12, 2000, 56);
+  assert.equal(theaterHeaderVisible(state), true);
+  state = theaterAfterMove(state, 240, 3000, 56);
+  assert.equal(theaterHeaderVisible(state), false);
+  state = theaterHoldPeek(state, true);
+  assert.equal(theaterHeaderVisible(state), true);
+  state = theaterHoldPeek(theaterAfterMove(state, 240, 4000, 56), true);
+  assert.equal(theaterActive(state), true);
   assert.equal(theaterHeaderVisible(state), true);
 });
 
@@ -186,6 +206,33 @@ test("roleta de gifs de triste e feliz percorre todos os itens sem repetir até 
   }
   assert.equal(new Set(seenHappy).size, HAPPY_GIFS.length);
   assert.equal(pickNextGif(HAPPY_GIFS, hIdx).src, HAPPY_GIFS[0]);
+});
+
+test("topo compacto e toque sem hover: volume abre no tap, teatro não entra sozinho, ✕ da tela cheia permanece", () => {
+  assert.equal(HEADER_COMPACT_PX, 720);
+  assert.equal(headerShouldCompact(720), true);
+  assert.equal(headerShouldCompact(721), false);
+  assert.equal(headerShouldCompact(390), true);
+  assert.equal(headerShouldCompact(1280), false);
+
+  assert.equal(pointerHasHover("hover", "fine"), true);
+  assert.equal(pointerHasHover("none", "coarse"), false);
+  assert.equal(pointerHasHover("hover", "coarse"), false);
+  assert.equal(pointerHasHover("none", "fine"), false);
+
+  assert.equal(theaterAutoIdleMs(true), 30000);
+  assert.equal(theaterAutoIdleMs(false), Number.POSITIVE_INFINITY);
+  let state = createTheaterState();
+  state = theaterAfterTick(state, true, 1000, theaterAutoIdleMs(false));
+  state = theaterAfterTick(state, true, 40000, theaterAutoIdleMs(false));
+  assert.equal(theaterActive(state), false);
+
+  assert.equal(fullscreenExitLingerMs(true), 1400);
+  assert.equal(fullscreenExitLingerMs(false), 0);
+
+  assert.deepEqual(volumeTapAction(true, true), { open: true, mute: true });
+  assert.deepEqual(volumeTapAction(false, false), { open: true, mute: false });
+  assert.deepEqual(volumeTapAction(false, true), { open: false, mute: false });
 });
 
 test("duas lives ficam uma sobre a outra só abaixo da metade do monitor", () => {

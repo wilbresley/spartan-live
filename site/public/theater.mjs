@@ -57,6 +57,36 @@ export function theaterHeaderVisible(state) {
   return false;
 }
 
+export function theaterHoldPeek(state, hold) {
+  if (!hold || !theaterActive(state)) return state || createTheaterState();
+  if (state.peek) return state;
+  return { ...state, peek: true };
+}
+
+export const HEADER_COMPACT_PX = 720;
+export const FULLSCREEN_EXIT_MS = 1400;
+
+export function headerShouldCompact(width, limit = HEADER_COMPACT_PX) {
+  return Number(width) <= limit;
+}
+
+export function pointerHasHover(hover = "", pointer = "") {
+  return hover === "hover" && pointer === "fine";
+}
+
+export function theaterAutoIdleMs(hoverOk) {
+  return hoverOk ? THEATER_IDLE_MS : Number.POSITIVE_INFINITY;
+}
+
+export function fullscreenExitLingerMs(hoverOk) {
+  return hoverOk ? FULLSCREEN_EXIT_MS : 0;
+}
+
+export function volumeTapAction(hoverOk, open) {
+  if (hoverOk) return { open: Boolean(open), mute: true };
+  return { open: !open, mute: false };
+}
+
 export const MAX_VOLUME_STEP = 200;
 export const MAX_SAVED_VOLUME_STEP = 100;
 export const TOAST_DURATION_MS = 5000;
