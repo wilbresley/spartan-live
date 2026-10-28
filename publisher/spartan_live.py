@@ -1387,6 +1387,14 @@ def list_replay_segments(folder):
     return files
 
 
+def ready_replay_segments(files):
+    """Cola todos menos o último pedaço, que ainda está sendo escrito."""
+    paths = [path for path in (files or []) if path]
+    if len(paths) < 2:
+        return []
+    return paths[:-1]
+
+
 def write_replay_concat(files, list_path):
     with open(list_path, "w", encoding="utf-8") as handle:
         for path in files:
@@ -1407,8 +1415,22 @@ def build_replay_save_command(ffmpeg, list_path, dest):
     ]
 
 
-def build_mux_command(ffmpeg, pipe, relay, offset, rtmp, replay_dir=None):
+def start_action_label(site_on, restream_url, replay_on):
+    if site_on or str(restream_url or "").strip():
+        return "Transmitir"
+    if replay_on:
+        return "Guardar"
+    return "Transmitir"
+
+
+def build_mux_command(ffmpeg, pipe, relay, offset, rtmp, replay_dir=None, restream=None):
     """Copia a imagem já codificada e grava o som no mesmo horário, sem reescalar o vídeo."""
+    primary = str(rtmp or "").strip()
+    extra = str(restream or "").strip()
+    if not primary:
+        primary = extra
+        extra = ""
+    folder = str(replay_dir or "").strip()
     command = [
         ffmpeg,
         "-hide_banner",
@@ -1429,24 +1451,42 @@ def build_mux_command(ffmpeg, pipe, relay, offset, rtmp, replay_dir=None):
         "-muxdelay", "0",
         "-muxpreload", "0",
         "-flush_packets", "1",
-        "-f", "flv",
-        "-flvflags", "no_duration_filesize",
-        rtmp,
     ]
-    folder = str(replay_dir or "").strip()
-    if not folder:
+    if primary:
+        command += ["-f", "flv", "-flvflags", "no_duration_filesize", primary]
+        if extra and extra != primary:
+            command.extend([
+                "-map", "0:a:0",
+                "-map", "1:v:0",
+                "-c:v", "copy",
+                "-c:a", "aac", "-b:a", "256k", "-ar", "48000", "-ac", "2",
+                "-f", "flv",
+                "-flvflags", "no_duration_filesize",
+                extra,
+            ])
+        if folder:
+            command.extend([
+                "-map", "0:a:0",
+                "-map", "1:v:0",
+                "-c:v", "copy",
+                "-c:a", "aac", "-b:a", "256k", "-ar", "48000", "-ac", "2",
+                "-f", "segment",
+                "-segment_time", str(REPLAY_SEGMENT_S),
+                "-segment_wrap", str(REPLAY_WRAP),
+                "-reset_timestamps", "1",
+                os.path.join(folder, "seg_%03d.ts"),
+            ])
         return command
-    command.extend([
-        "-map", "0:a:0",
-        "-map", "1:v:0",
-        "-c:v", "copy",
-        "-c:a", "aac", "-b:a", "256k", "-ar", "48000", "-ac", "2",
-        "-f", "segment",
-        "-segment_time", str(REPLAY_SEGMENT_S),
-        "-segment_wrap", str(REPLAY_WRAP),
-        "-reset_timestamps", "1",
-        os.path.join(folder, "seg_%03d.ts"),
-    ])
+    if folder:
+        command += [
+            "-f", "segment",
+            "-segment_time", str(REPLAY_SEGMENT_S),
+            "-segment_wrap", str(REPLAY_WRAP),
+            "-reset_timestamps", "1",
+            os.path.join(folder, "seg_%03d.ts"),
+        ]
+        return command
+    command += ["-f", "null", "-"]
     return command
 
 
@@ -4171,6 +4211,16 @@ def rtmp_url(publish, nick):
     return f"rtmp://{host}:{port}/{nick}?user={user}&pass={password}"
 
 
+def clean_restream_url(value):
+    text = str(value or "").strip()
+    if not text or len(text) > 400 or any(ch.isspace() for ch in text):
+        return ""
+    lower = text.lower()
+    if not (lower.startswith("rtmp://") or lower.startswith("rtmps://")):
+        return ""
+    return text
+
+
 def available_encoders(ffmpeg):
     output = subprocess.check_output(
         [ffmpeg, "-hide_banner", "-encoders"],
@@ -4479,7 +4529,7 @@ def load_square_icon(path, size):
 
 
 DEFAULT_WIDTH = 580
-DEFAULT_HEIGHT = 760
+DEFAULT_HEIGHT = 840
 RESIZE_GRIP = 6
 
 
@@ -4705,6 +4755,8 @@ class App(QWidget):
         self._audience_filter = ""
         self._audience_dialog = None
         self._replay_dir = None
+        self._site_live = True
+        self._restream_live = ""
         self._last_viewer_poll = 0.0
         self._hotkeys_installed = False
         self._window_feeder = None
@@ -5234,6 +5286,7 @@ class App(QWidget):
 
         self.nick = _QtVar(self.settings.get("nick", ""))
         self.host = _QtVar(clean_host(self.settings.get("host") or "", ""))
+        self.restream = _QtVar(str(self.settings.get("restream") or ""))
         chosen = parse_quality(self.settings.get("quality"), self.settings.get("fps"))
         self.quality = _QtVar(chosen[0])
         self.monitor_index = _QtVar(int(self.settings.get("monitor") or 0))
@@ -5247,7 +5300,103 @@ class App(QWidget):
             max_len=24,
             allow="nick",
         )
-        self._field("Servidor", self.host)
+        dest_check_style = (
+            f"""
+            QCheckBox {{ color: {self.fg}; spacing: 6px; }}
+            QCheckBox::indicator {{
+                width: 16px; height: 16px; border-radius: 4px;
+                border: 1px solid #484848; background-color: {self.field};
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: {self.accent}; border-color: {self.accent};
+            }}
+            """
+        )
+        dest_entry_style = (
+            f"""
+            QLineEdit {{
+                background-color: {self.field}; color: {self.fg};
+                border: 1px solid #343434; border-radius: 8px; padding: 2px 10px;
+            }}
+            QLineEdit:focus {{
+                border: 1px solid {self.accent};
+            }}
+            """
+        )
+
+        host_box = QWidget(self.content)
+        host_vbox = QVBoxLayout(host_box)
+        host_vbox.setContentsMargins(0, 0, 0, 0)
+        host_vbox.setSpacing(2)
+        host_lbl = QLabel("Servidor", host_box)
+        host_lbl.setFont(QFont("Segoe UI", 10))
+        host_lbl.setStyleSheet(f"color: {self.muted};")
+        host_vbox.addWidget(host_lbl)
+        host_row = QWidget(host_box)
+        host_bar = QHBoxLayout(host_row)
+        host_bar.setContentsMargins(0, 0, 0, 0)
+        host_bar.setSpacing(8)
+        self.site_check = _CheckProxy("Página", host_row)
+        self.site_check.setFont(QFont("Segoe UI", 10))
+        self.site_check.setChecked(self.settings.get("site") is not False)
+        self.site_check.setStyleSheet(dest_check_style)
+        self.site_check.setToolTip("Mandar para a página dos amigos, no endereço ao lado.")
+        host_bar.addWidget(self.site_check)
+        host_entry = QLineEdit(str(self.host.get() or ""), host_row)
+        host_entry.setFont(QFont("Segoe UI", 11))
+        host_entry.setFixedHeight(36)
+        host_entry.setStyleSheet(dest_entry_style)
+
+        def _apply_host(txt):
+            self.host._value = str(txt or "")
+
+        host_entry.textChanged.connect(_apply_host)
+        self.host._sync_fn = host_entry.text
+        self.host.trace_add(
+            "write",
+            lambda: host_entry.setText(str(self.host._value or ""))
+            if host_entry.text() != str(self.host._value or "")
+            else None,
+        )
+        host_bar.addWidget(host_entry, 1)
+        host_vbox.addWidget(host_row)
+        self._content_layout.addWidget(host_box)
+
+        dest_row = QWidget(self.content)
+        dest_box = QHBoxLayout(dest_row)
+        dest_box.setContentsMargins(0, 0, 0, 0)
+        dest_box.setSpacing(8)
+        restream_flag = self.settings.get("restream_on")
+        if restream_flag is None:
+            restream_flag = bool(str(self.restream.get() or "").strip())
+        self.restream_check = _CheckProxy("Restreamer", dest_row)
+        self.restream_check.setFont(QFont("Segoe UI", 10))
+        self.restream_check.setChecked(bool(restream_flag))
+        self.restream_check.setStyleSheet(dest_check_style)
+        self.restream_check.setToolTip("Mandar uma cópia para o Restreamer. Cola o rtmp:// ao lado.")
+        dest_box.addWidget(self.restream_check)
+        self.restream_entry = QLineEdit(str(self.restream.get() or ""), dest_row)
+        self.restream_entry.setFont(QFont("Segoe UI", 11))
+        self.restream_entry.setFixedHeight(36)
+        self.restream_entry.setPlaceholderText("rtmp://  (vazio = não manda)")
+        self.restream_entry.setToolTip("Cola o endereço RTMP do Restreamer. Só vale ao clicar em Transmitir ou Guardar.")
+        self.restream_entry.setStyleSheet(dest_entry_style)
+
+        def _apply_restream(txt):
+            self.restream._value = str(txt or "")
+            if str(txt or "").strip() and not self.restream_check.isChecked():
+                self.restream_check.setChecked(True)
+
+        self.restream_entry.textChanged.connect(_apply_restream)
+        self.restream._sync_fn = self.restream_entry.text
+        self.restream.trace_add(
+            "write",
+            lambda: self.restream_entry.setText(str(self.restream._value or ""))
+            if self.restream_entry.text() != str(self.restream._value or "")
+            else None,
+        )
+        dest_box.addWidget(self.restream_entry, 1)
+        self._content_layout.addWidget(dest_row)
 
         self.monitor_labels = [monitor_label(i, monitor) for i, monitor in enumerate(self.monitors)] or ["Tela 1"]
         saved = self.monitor_index.get()
@@ -5423,7 +5572,8 @@ class App(QWidget):
         self.replay_check.setFont(QFont("Segoe UI", 9))
         self.replay_check.setChecked(False)
         self.replay_check.setStyleSheet(check_style)
-        self.replay_check.setToolTip("Guardar os últimos 10 min (opcional). Só vale ao clicar em Transmitir.")
+        self.replay_check.setToolTip("Guarda os últimos 10 min no PC. Só vale ao clicar em Transmitir ou Guardar. Sem site e sem Restreamer, só grava.")
+        self.replay_check.toggled.connect(lambda *_args: self._paint_start_button())
         self.replay_save = QPushButton("Salvar clipe", actions)
         self.replay_save.setFont(QFont("Segoe UI", 9))
         self.replay_save.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -5442,6 +5592,10 @@ class App(QWidget):
         actions_row.addWidget(self.audience_button, 1)
         actions_row.addWidget(self.button, 2)
         self._content_layout.addWidget(actions)
+        self.site_check.toggled.connect(lambda *_args: self._paint_start_button())
+        self.restream_check.toggled.connect(lambda *_args: self._paint_start_button())
+        self.restream_entry.textChanged.connect(lambda *_args: self._paint_start_button())
+        self._paint_start_button()
         self._sync_viewport()
 
     def _sync_viewport(self, w=None, h=None):
@@ -5527,6 +5681,7 @@ class App(QWidget):
             tip.setStyleSheet(f"color: {self.muted};")
             vbox.addWidget(tip)
         self._content_layout.addWidget(box)
+        return entry
 
     def _choice(self, label, variable, labels, volume_var=None, volume_cmd=None, before_open=None, refresh_cmd=None, targets_provider=None, sound_provider=None):
         box = QWidget(self.content)
@@ -5821,7 +5976,7 @@ class App(QWidget):
 
     def _save_replay_clip(self):
         folder = getattr(self, "_replay_dir", None) or replay_folder()
-        files = list_replay_segments(folder)
+        files = ready_replay_segments(list_replay_segments(folder))
         if not files:
             QMessageBox.information(self, "Spartan Live", "Ainda não tem trecho guardado. Marque a caixa e transmita.")
             return
@@ -5928,6 +6083,9 @@ class App(QWidget):
         data = {
             "nick": self.nick.get().strip(),
             "host": clean_host(self.host.get(), ""),
+            "site": bool(self.site_check.isChecked()) if hasattr(self, "site_check") else True,
+            "restream": clean_restream_url(self.restream.get()) if hasattr(self, "restream") else "",
+            "restream_on": bool(self.restream_check.isChecked()) if hasattr(self, "restream_check") else False,
             "quality": self.selected_quality()[0],
             "fps": self.selected_quality()[4],
             "monitor": saved_idx,
@@ -5961,15 +6119,57 @@ class App(QWidget):
             return
         self.start()
 
+    def _set_dest_enabled(self, on):
+        if hasattr(self, "site_check"):
+            self.site_check.setEnabled(on)
+        if hasattr(self, "restream_check"):
+            self.restream_check.setEnabled(on)
+        if hasattr(self, "restream_entry") and self.restream_entry is not None:
+            self.restream_entry.setEnabled(on)
+        if hasattr(self, "replay_check"):
+            self.replay_check.setEnabled(on)
+
+    def _paint_start_button(self):
+        if self.running:
+            self.button.config(text="Parar")
+            return
+        site_on = bool(self.site_check.isChecked()) if hasattr(self, "site_check") else True
+        restream = ""
+        if hasattr(self, "restream_check") and self.restream_check.isChecked() and hasattr(self, "restream"):
+            restream = str(self.restream.get() or "")
+        elif not hasattr(self, "restream_check") and hasattr(self, "restream"):
+            restream = str(self.restream.get() or "")
+        replay_on = bool(self.replay_check.isChecked()) if hasattr(self, "replay_check") else False
+        self.button.config(text=start_action_label(site_on, restream, replay_on))
+
     def start(self):
         nick = self.nick.get().strip()
         host = clean_host(self.host.get(), "")
         self.host.set(host)
+        raw_restream = str(self.restream.get() or "").strip() if hasattr(self, "restream") else ""
+        restream = clean_restream_url(raw_restream)
+        restream_wanted = bool(self.restream_check.isChecked()) if hasattr(self, "restream_check") else bool(raw_restream)
+        site_on = bool(self.site_check.isChecked()) if hasattr(self, "site_check") else True
+        replay_on = bool(self.replay_check.isChecked()) if hasattr(self, "replay_check") else False
         if not valid_nick(nick):
             QMessageBox.critical(self, "Spartan Live", "O apelido precisa ter 2 a 24 letras, números, _ ou -.")
             return
-        if not host or not self.publish.get("password") or not self.publish.get("user"):
+        if site_on and (not host or not self.publish.get("password") or not self.publish.get("user")):
             QMessageBox.critical(self, "Spartan Live", "Falta o servidor neste programa.")
+            return
+        if restream_wanted:
+            if raw_restream and not restream:
+                QMessageBox.critical(self, "Spartan Live", "O Restreamer precisa começar com rtmp:// ou rtmps://.")
+                return
+            if not restream:
+                QMessageBox.critical(self, "Spartan Live", "Cola o endereço do Restreamer.")
+                return
+        else:
+            restream = ""
+        if hasattr(self, "restream") and restream:
+            self.restream.set(restream)
+        if not site_on and not restream and not replay_on:
+            QMessageBox.critical(self, "Spartan Live", "Marca a página, o Restreamer ou Guardar 10 min.")
             return
         ffmpeg = existing_file("ffmpeg.exe")
         if not ffmpeg:
@@ -5979,15 +6179,22 @@ class App(QWidget):
         self.save_settings()
         self.running = True
         self.stopping = False
+        self._site_live = site_on
+        self._restream_live = restream
         replay_dir = None
-        if hasattr(self, "replay_check") and self.replay_check.isChecked():
+        if replay_on:
             try:
                 replay_dir = prepare_replay_dir(replay_folder())
             except OSError:
+                if not site_on and not restream:
+                    QMessageBox.critical(self, "Spartan Live", "Não deu para criar a pasta do clipe.")
+                    self.running = False
+                    self.stopping = True
+                    self._paint_start_button()
+                    return
                 QMessageBox.warning(self, "Spartan Live", "Não deu para criar a pasta do clipe. A live segue sem gravar.")
         self._replay_dir = replay_dir
-        if hasattr(self, "replay_check"):
-            self.replay_check.setEnabled(False)
+        self._set_dest_enabled(False)
         self.button.config(text="Parar")
         self.set_status("Preparando a captura...")
         output_idx = self.selected_monitor()
@@ -6016,15 +6223,19 @@ class App(QWidget):
 
         publish = dict(self.publish)
         publish["host"] = host
-        url = rtmp_url(publish, nick)
+        site_on = bool(getattr(self, "_site_live", True))
+        restream = str(getattr(self, "_restream_live", "") or "")
+        site_url = rtmp_url(publish, nick) if site_on and host else ""
+        url = site_url or restream
         _key, _label, width, height, fps = self.selected_quality()
         monitor = self.monitors[output_idx]
 
         last_error = "A transmissão caiu."
         self.live_nick = nick
-        self.live_host = host
+        self.live_host = host if site_on else ""
         log_event(f"inicio apelido={nick} {width}x{height} fps={fps} pc={pc_audio or '-'} mic={mic or '-'}")
-        notify_publisher(host, nick, self.publish.get("user", ""), self.publish.get("password", ""), "claim")
+        if site_on:
+            notify_publisher(host, nick, self.publish.get("user", ""), self.publish.get("password", ""), "claim")
         live_audio = None
         self.after(0, lambda: self.set_status("Abrindo o som..."))
         live_audio = LiveAudio(
@@ -6625,6 +6836,7 @@ class App(QWidget):
                 build_mux_command(
                     video_command[0], pipe_name, relay, 0.0, rtmp,
                     replay_dir=getattr(self, "_replay_dir", None),
+                    restream=getattr(self, "_restream_live", "") or None,
                 ),
                 subprocess.DEVNULL,
             )
@@ -6658,7 +6870,9 @@ class App(QWidget):
         if code is None and proc.poll() is None:
             label = ENCODER_LABEL.get(encoder, encoder)
             extra = " PC pode ficar pesado; 720p 30 alivia." if encoder == "libx264" and height >= 1080 and fps >= 60 else ""
-            message = f"Transmitindo em {height}p a {fps} fps ({label}).{note}{extra}"
+            sending = bool(getattr(self, "_site_live", True) or getattr(self, "_restream_live", ""))
+            verb = "Transmitindo" if sending else "Guardando"
+            message = f"{verb} em {height}p a {fps} fps ({label}).{note}{extra}"
             self.after(0, lambda message=message: self._live(message))
             self._wait_proc(proc)
             if not self.stopping and self._has_pending_switch():
@@ -6808,9 +7022,8 @@ class App(QWidget):
         self.running = False
         self.proc = None
         self.video_proc = None
-        if hasattr(self, "replay_check"):
-            self.replay_check.setEnabled(True)
-        self.button.config(text="Transmitir")
+        self._set_dest_enabled(True)
+        self._paint_start_button()
         message = explain_error(text)
         self.set_status(message)
         log_event("falha " + message[:300])
@@ -6919,9 +7132,8 @@ class App(QWidget):
         self._kill_ffmpeg()
         self.proc = None
         self.video_proc = None
-        if hasattr(self, "replay_check"):
-            self.replay_check.setEnabled(True)
-        self.button.config(text="Transmitir")
+        self._set_dest_enabled(True)
+        self._paint_start_button()
         self.set_status("Parado.")
         self._paint_audience_list()
 

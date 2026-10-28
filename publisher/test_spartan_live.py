@@ -29,6 +29,7 @@ from spartan_live import (
     audience_status,
     build_replay_save_command,
     clean_display_nick,
+    clean_restream_url,
     filter_audience,
     apply_startup,
     build_command,
@@ -41,6 +42,8 @@ from spartan_live import (
     monitor_label,
     prefer_capture,
     plan_audio,
+    ready_replay_segments,
+    start_action_label,
     progress_seconds,
     progress_speed,
     network_slow_streak,
@@ -364,6 +367,52 @@ class PublisherTests(unittest.TestCase):
         self.assertNotIn("aresample", with_replay)
         self.assertNotIn("cfr", with_replay)
         self.assertTrue(with_replay[-1].endswith("seg_%03d.ts"))
+        restream = "rtmp://192.168.100.16:1936/live/spartan.stream?token=segredo"
+        with_restream = build_mux_command(
+            "ffmpeg.exe", r"\\.\pipe\spartan-live-test", relay, 0.085, "rtmp://servidor/nick",
+            restream=restream,
+        )
+        self.assertEqual(with_restream[:len(gold)], gold)
+        self.assertEqual(with_restream[-1], restream)
+        self.assertEqual(with_restream.count("rtmp://servidor/nick"), 1)
+        self.assertNotIn("aresample", with_restream)
+        self.assertNotIn("cfr", with_restream)
+        only_restream = build_mux_command(
+            "ffmpeg.exe", r"\\.\pipe\spartan-live-test", relay, 0.085, "",
+            restream=restream,
+        )
+        self.assertEqual(only_restream[-1], restream)
+        self.assertNotIn("rtmp://servidor/nick", only_restream)
+        both_and_replay = build_mux_command(
+            "ffmpeg.exe", r"\\.\pipe\spartan-live-test", relay, 0.085, "rtmp://servidor/nick",
+            replay_dir=r"C:\replay",
+            restream=restream,
+        )
+        self.assertEqual(both_and_replay[:len(gold)], gold)
+        self.assertTrue(both_and_replay[-1].endswith("seg_%03d.ts"))
+        self.assertIn(restream, both_and_replay)
+        only_replay = build_mux_command(
+            "ffmpeg.exe", r"\\.\pipe\spartan-live-test", relay, 0.085, "",
+            replay_dir=r"C:\replay",
+        )
+        flv_at = len(gold) - 1 - gold[::-1].index("-f")
+        self.assertEqual(gold[flv_at:flv_at + 2], ["-f", "flv"])
+        self.assertEqual(only_replay[:flv_at], gold[:flv_at])
+        self.assertEqual(only_replay[flv_at:flv_at + 2], ["-f", "segment"])
+        self.assertTrue(only_replay[-1].endswith("seg_%03d.ts"))
+        self.assertNotIn("flv", only_replay)
+        self.assertNotIn("aresample", only_replay)
+        self.assertNotIn("cfr", only_replay)
+        self.assertIn("copy", only_replay)
+        self.assertIn("aac", only_replay)
+        self.assertIn("256k", only_replay)
+        self.assertIn("-segment_wrap", only_replay)
+        self.assertIn("300", only_replay)
+        self.assertEqual(start_action_label(True, "", False), "Transmitir")
+        self.assertEqual(start_action_label(False, "rtmp://x", False), "Transmitir")
+        self.assertEqual(start_action_label(False, "", True), "Guardar")
+        self.assertEqual(start_action_label(False, "", False), "Transmitir")
+        self.assertEqual(start_action_label(True, "", True), "Transmitir")
         save = build_replay_save_command("ffmpeg.exe", r"C:\replay\concat.txt", r"C:\Videos\clipe.mp4")
         self.assertEqual(save[0], "ffmpeg.exe")
         self.assertIn("concat", save)
@@ -371,6 +420,14 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(video_clock("Duration: N/A, start: 1791758504.670458, bitrate: 1"), 1791758504.670458)
         self.assertIsNone(video_clock("start: 0.000000"))
         self.assertEqual(wav_header()[:4], b"RIFF")
+        self.assertEqual(ready_replay_segments([]), [])
+        self.assertEqual(ready_replay_segments(["a.ts"]), [])
+        self.assertEqual(ready_replay_segments(["a.ts", "b.ts"]), ["a.ts"])
+        self.assertEqual(ready_replay_segments(["a.ts", "b.ts", "c.ts"]), ["a.ts", "b.ts"])
+        self.assertEqual(clean_restream_url(""), "")
+        self.assertEqual(clean_restream_url("  rtmp://10.0.0.8:1936/live/x.stream?token=a  "), "rtmp://10.0.0.8:1936/live/x.stream?token=a")
+        self.assertEqual(clean_restream_url("https://exemplo.com"), "")
+        self.assertEqual(clean_restream_url("rtmp://host/live x"), "")
 
     def test_comando_com_som_e_microfone(self):
         command = build_command(
@@ -764,6 +821,35 @@ class PublisherTests(unittest.TestCase):
             self.assertEqual(app.audience_button.label, "Espectadores")
             self.assertTrue(hasattr(app, "replay_check"))
             self.assertFalse(app.replay_check.isChecked())
+            self.assertTrue(hasattr(app, "site_check"))
+            self.assertEqual(app.site_check.text(), "Página")
+            self.assertTrue(app.site_check.isChecked())
+            self.assertTrue(hasattr(app, "restream_check"))
+            self.assertEqual(app.restream_check.text(), "Restreamer")
+            self.assertFalse(app.restream_check.isChecked())
+            self.assertTrue(hasattr(app, "restream_entry"))
+            self.assertLess(
+                app.site_check.winfo_y() + app.site_check.winfo_height() - 1,
+                app.restream_check.winfo_y(),
+            )
+            app.site_check.setChecked(False)
+            app.replay_check.setChecked(True)
+            app.update()
+            self.assertEqual(app.button.label, "Guardar")
+            app.restream_entry.setText("rtmp://192.168.100.16:1936/live/x.stream")
+            app.update()
+            self.assertTrue(app.restream_check.isChecked())
+            self.assertEqual(app.button.label, "Transmitir")
+            app.restream_check.setChecked(False)
+            app.update()
+            self.assertEqual(app.button.label, "Guardar")
+            app.restream_entry.setText("")
+            app.update()
+            self.assertEqual(app.button.label, "Guardar")
+            app.site_check.setChecked(True)
+            app.replay_check.setChecked(False)
+            app.update()
+            self.assertEqual(app.button.label, "Transmitir")
             sent = []
 
             def capture(host, nick, user, password, guests_temp, guests_perm):
@@ -902,7 +988,8 @@ class PublisherTests(unittest.TestCase):
         mons = [{"left": 0, "top": 0, "width": 1920, "height": 1080}]
         self.assertIsNone(valid_saved_geom("560x720+-2400+-2400", mons))
         self.assertIsNone(valid_saved_geom("560x720+100+100", mons))
-        self.assertEqual(valid_saved_geom("580x760+100+100", mons), "580x760+100+100")
+        self.assertIsNone(valid_saved_geom("580x760+100+100", mons))
+        self.assertEqual(valid_saved_geom("580x840+100+100", mons), "580x840+100+100")
         self.assertIsNone(valid_saved_geom("500x700+100+100", mons))
         self.assertAlmostEqual(progress_speed("speed=0.82x"), 0.82)
         self.assertIsNone(progress_speed("speed=N/A"))
