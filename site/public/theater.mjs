@@ -74,8 +74,9 @@ export function pointerHasHover(hover = "", pointer = "") {
   return hover === "hover" && pointer === "fine";
 }
 
-export function theaterAutoIdleMs(hoverOk) {
-  return hoverOk ? THEATER_IDLE_MS : Number.POSITIVE_INFINITY;
+export function theaterAutoIdleMs(hoverOk, railPinned = false) {
+  if (!hoverOk || railPinned) return Number.POSITIVE_INFINITY;
+  return THEATER_IDLE_MS;
 }
 
 export function fullscreenExitLingerMs(hoverOk) {

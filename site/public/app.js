@@ -1016,12 +1016,14 @@ railToggle.addEventListener("click", () => {
     railState = railAfterPinToggle(railState);
     rememberRail();
     paintRail();
+    tickTheater();
     return;
   }
   if (!open && !railForceOpen()) return;
   railState = railAfterPinToggle(railState);
   rememberRail();
   paintRail();
+  tickTheater();
 });
 
 if (railWrap) {
@@ -1972,15 +1974,24 @@ document.addEventListener("pointerdown", (event) => {
   applyTheaterPointer(event.clientY);
 });
 
-window.setInterval(() => {
+function tickTheater() {
   if (appView.classList.contains("hidden") || arrivalToastOpenNow()) return;
-  const next = theaterAfterTick(theaterState, anyPlayingPeer(), Date.now(), theaterAutoIdleMs(pointerCanHover()));
+  const next = theaterAfterTick(
+    theaterState,
+    anyPlayingPeer(),
+    Date.now(),
+    theaterAutoIdleMs(pointerCanHover(), Boolean(railState.pinned)),
+  );
   if (next.auto !== theaterState.auto || next.manual !== theaterState.manual) {
     theaterState = next;
     paintTheater();
   } else {
     theaterState = next;
   }
+}
+
+window.setInterval(() => {
+  tickTheater();
 }, 1000);
 
 document.addEventListener("visibilitychange", () => {

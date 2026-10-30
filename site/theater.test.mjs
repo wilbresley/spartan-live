@@ -222,6 +222,8 @@ test("topo compacto e toque sem hover: volume abre no tap, teatro não entra soz
 
   assert.equal(theaterAutoIdleMs(true), 30000);
   assert.equal(theaterAutoIdleMs(false), Number.POSITIVE_INFINITY);
+  assert.equal(theaterAutoIdleMs(true, true), Number.POSITIVE_INFINITY);
+  assert.equal(theaterAutoIdleMs(true, false), 30000);
   let state = createTheaterState();
   state = theaterAfterTick(state, true, 1000, theaterAutoIdleMs(false));
   state = theaterAfterTick(state, true, 40000, theaterAutoIdleMs(false));
@@ -233,6 +235,25 @@ test("topo compacto e toque sem hover: volume abre no tap, teatro não entra soz
   assert.deepEqual(volumeTapAction(true, true), { open: true, mute: true });
   assert.deepEqual(volumeTapAction(false, false), { open: true, mute: false });
   assert.deepEqual(volumeTapAction(false, true), { open: false, mute: false });
+});
+
+test("menu Lives fixado não entra no teatro automático; T ainda entra na hora", () => {
+  let state = createTheaterState();
+  state = theaterAfterTick(state, true, 1000, theaterAutoIdleMs(true, true));
+  state = theaterAfterTick(state, true, 40000, theaterAutoIdleMs(true, true));
+  assert.equal(state.auto, false);
+  assert.equal(theaterActive(state), false);
+
+  state = theaterAfterTick(createTheaterState(), true, 1000, 30000);
+  state = theaterAfterTick(state, true, 31000, 30000);
+  assert.equal(state.auto, true);
+  state = theaterAfterTick(state, true, 32000, theaterAutoIdleMs(true, true));
+  assert.equal(state.auto, false);
+  assert.equal(theaterActive(state), false);
+
+  state = theaterAfterToggle(state, 32000);
+  assert.equal(state.manual, true);
+  assert.equal(theaterActive(state), true);
 });
 
 test("duas lives ficam uma sobre a outra só abaixo da metade do monitor", () => {
