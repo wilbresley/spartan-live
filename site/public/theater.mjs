@@ -279,7 +279,7 @@ export function listRoster(book, name, now = Date.now(), ttlMs = VIEWER_TTL_MS) 
   return people;
 }
 
-export const GIF_CACHE = "v5";
+export const GIF_CACHE = "v7";
 export const SAD_GIFS = Array.from({ length: 12 }, (_, idx) => `/gifs/sad-${idx + 1}.gif?${GIF_CACHE}`);
 export const HAPPY_GIFS = Array.from({ length: 12 }, (_, idx) => `/gifs/happy-${idx + 1}.gif?${GIF_CACHE}`);
 
