@@ -41,6 +41,12 @@ from spartan_live import (
     match_output_index,
     monitor_label,
     prefer_capture,
+    dxgi_adapter_capture_score,
+    pick_best_dxgi_adapter,
+    capture_clock_wait_s,
+    wgc_miss_limit,
+    format_dxgi_adapters_log,
+    format_capture_target_log,
     plan_audio,
     ready_replay_segments,
     start_action_label,
@@ -330,6 +336,32 @@ class PublisherTests(unittest.TestCase):
         self.assertIn("output_idx=1", command[-1])
         self.assertIn("draw_mouse=1", command[-1])
         self.assertEqual(command[:3], ["-f", "lavfi", "-i"])
+
+    def test_placa_dedicada_ganha_da_igpu_no_wgc(self):
+        igpu = {"description": "AMD Radeon(TM) Graphics", "vendor_id": 0x1002, "dedicated_vram": 512 * 1024 * 1024}
+        nvidia = {"description": "NVIDIA GeForce RTX 4070 Ti", "vendor_id": 0x10DE, "dedicated_vram": 12 * 1024 * 1024 * 1024}
+        basic = {"description": "Microsoft Basic Render Driver", "vendor_id": 0x1414, "dedicated_vram": 0}
+        self.assertLess(
+            dxgi_adapter_capture_score(igpu["description"], igpu["vendor_id"], igpu["dedicated_vram"]),
+            dxgi_adapter_capture_score(nvidia["description"], nvidia["vendor_id"], nvidia["dedicated_vram"]),
+        )
+        self.assertEqual(dxgi_adapter_capture_score(basic["description"], basic["vendor_id"], basic["dedicated_vram"]), -1)
+        self.assertEqual(pick_best_dxgi_adapter([basic, igpu, nvidia]), 2)
+        self.assertEqual(pick_best_dxgi_adapter([igpu, nvidia]), 1)
+        self.assertEqual(pick_best_dxgi_adapter([]), -1)
+        self.assertEqual(capture_clock_wait_s("window"), 10.0)
+        self.assertEqual(capture_clock_wait_s("ddagrab"), 4.0)
+        self.assertEqual(wgc_miss_limit(30), 30)
+        self.assertEqual(wgc_miss_limit(60), 60)
+        self.assertEqual(wgc_miss_limit(15), 30)
+        self.assertIn("pick=NVIDIA", format_dxgi_adapters_log([igpu, nvidia], 1))
+        self.assertEqual(format_dxgi_adapters_log([]), "gpus=nenhuma")
+        self.assertIn("alvo=window exe=game.exe", format_capture_target_log({
+            "kind": "window", "exe": "game.exe", "hwnd": 42, "pid": 7, "title": "Boss Fight",
+        }))
+        self.assertIn("alvo=screen 1920x1080", format_capture_target_log({
+            "left": 0, "top": 0, "width": 1920, "height": 1080, "output": 1,
+        }))
 
     def test_comando_com_som_do_pc(self):
         relay = "tcp://127.0.0.1:17961"

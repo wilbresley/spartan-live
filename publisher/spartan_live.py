@@ -135,9 +135,12 @@ def prune_log_text(text, now, keep_days=30):
     return "\n".join(kept) + "\n"
 
 
+LOG_LINE_MAX = 700
+
+
 def log_event(message):
     global _log_pruned
-    text = " ".join(str(message).split())[:400]
+    text = " ".join(str(message).split())[:LOG_LINE_MAX]
     if not text:
         return
     path = log_path()
@@ -605,6 +608,148 @@ class _DXGI_OUTPUT_DESC(ctypes.Structure):
         ("Rotation", ctypes.c_uint),
         ("Monitor", ctypes.c_void_p),
     ]
+
+
+class _LUID(ctypes.Structure):
+    _fields_ = [("LowPart", ctypes.c_uint32), ("HighPart", ctypes.c_int32)]
+
+
+class _DXGI_ADAPTER_DESC(ctypes.Structure):
+    _fields_ = [
+        ("Description", ctypes.c_wchar * 128),
+        ("VendorId", ctypes.c_uint),
+        ("DeviceId", ctypes.c_uint),
+        ("SubSysId", ctypes.c_uint),
+        ("Revision", ctypes.c_uint),
+        ("DedicatedVideoMemory", ctypes.c_size_t),
+        ("DedicatedSystemMemory", ctypes.c_size_t),
+        ("SharedSystemMemory", ctypes.c_size_t),
+        ("AdapterLuid", _LUID),
+    ]
+
+
+def dxgi_adapter_capture_score(description, vendor_id, dedicated_vram):
+    """Placa dedicada com VRAM alta ganha da iGPU. O Basic Render Driver some da lista."""
+    name = str(description or "").lower()
+    if "microsoft basic render" in name or "basic render driver" in name:
+        return -1
+    vram = max(0, int(dedicated_vram or 0))
+    vendor = int(vendor_id or 0)
+    score = vram
+    if vendor in (0x10DE, 0x1002) and vram >= (512 * 1024 * 1024):
+        score += 10**12
+    return score
+
+
+def pick_best_dxgi_adapter(rows):
+    """Índice da melhor placa para capturar janela de jogo. -1 se a lista estiver vazia."""
+    best_i = -1
+    best_score = -1
+    for index, row in enumerate(rows or []):
+        score = dxgi_adapter_capture_score(
+            row.get("description"),
+            row.get("vendor_id"),
+            row.get("dedicated_vram"),
+        )
+        if score > best_score:
+            best_score = score
+            best_i = index
+    return best_i
+
+
+def capture_clock_wait_s(mode):
+    """Janela (WGC/PrintWindow) demora mais a emitir o primeiro horário do ffmpeg."""
+    return 10.0 if mode == "window" else 4.0
+
+
+def wgc_miss_limit(fps):
+    """Quantos misses seguidos até cair no PrintWindow (~1 s)."""
+    return max(30, int(fps or 30))
+
+
+def format_adapter_mb(vram):
+    return max(0, int(vram or 0)) // (1024 * 1024)
+
+
+def format_dxgi_adapters_log(rows, pick_index=-1):
+    """Uma linha com as placas e qual seria escolhida para WGC."""
+    parts = []
+    for row in rows or []:
+        name = str(row.get("description") or "?").strip() or "?"
+        parts.append(f"{name}:{format_adapter_mb(row.get('dedicated_vram'))}MB")
+    if not parts:
+        return "gpus=nenhuma"
+    text = "gpus=" + ";".join(parts)
+    if isinstance(pick_index, int) and 0 <= pick_index < len(rows):
+        pick = str(rows[pick_index].get("description") or "").strip()
+        if pick:
+            text += f" pick={pick}"
+    return text
+
+
+def format_capture_target_log(monitor):
+    """Identifica tela ou janela no log, sem caminho longo."""
+    if not isinstance(monitor, dict):
+        return "alvo=?"
+    if monitor.get("kind") == "window":
+        exe = str(monitor.get("exe") or "-").strip() or "-"
+        title = " ".join(str(monitor.get("title") or "").split())[:40] or "-"
+        return (
+            f"alvo=window exe={exe} hwnd={int(monitor.get('hwnd') or 0)} "
+            f"pid={int(monitor.get('pid') or 0)} titulo={title}"
+        )
+    return (
+        f"alvo=screen {int(monitor.get('width') or 0)}x{int(monitor.get('height') or 0)} "
+        f"left={int(monitor.get('left') or 0)} top={int(monitor.get('top') or 0)} "
+        f"out={monitor.get('output', '-')}"
+    )
+
+
+def windows_build_log():
+    try:
+        ver = sys.getwindowsversion()
+        return f"win={ver.major}.{ver.minor}.{ver.build}"
+    except Exception:
+        return "win=?"
+
+
+def list_dxgi_adapters():
+    """Placas DXGI para log e escolha. Sem manter ponteiro COM."""
+    try:
+        dxgi = ctypes.WinDLL("dxgi")
+        factory = ctypes.c_void_p()
+        iid = _guid("770aae78-f26f-4dba-a829-253c83d1b387")
+        if dxgi.CreateDXGIFactory1(ctypes.byref(iid), ctypes.byref(factory)) < 0 or not factory.value:
+            return []
+        rows = []
+        try:
+            for adapter_index in range(16):
+                adapter = ctypes.c_void_p()
+                if _com(factory, 7, ctypes.c_long, ctypes.c_uint, ctypes.POINTER(ctypes.c_void_p))(
+                    factory, adapter_index, ctypes.byref(adapter),
+                ) < 0 or not adapter.value:
+                    break
+                try:
+                    desc = _DXGI_ADAPTER_DESC()
+                    if _com(adapter, 8, ctypes.c_long, ctypes.POINTER(_DXGI_ADAPTER_DESC))(
+                        adapter, ctypes.byref(desc),
+                    ) < 0:
+                        continue
+                    name = str(desc.Description or "")
+                    if dxgi_adapter_capture_score(name, desc.VendorId, desc.DedicatedVideoMemory) < 0:
+                        continue
+                    rows.append({
+                        "description": name,
+                        "vendor_id": int(desc.VendorId),
+                        "dedicated_vram": int(desc.DedicatedVideoMemory),
+                    })
+                finally:
+                    _release(adapter)
+        finally:
+            _release(factory)
+        return rows
+    except Exception:
+        return []
 
 
 def _guid(value):
@@ -1723,9 +1868,86 @@ class _WGCWindowGrabber:
         self.borderless_ok = False
         self.active = False
         self._ro_inited = False
+        self.adapter_name = ""
+        self.fail_reason = ""
+
+    def _open_d3d_device(self, d3d11):
+        """Abre D3D11 na placa dedicada quando o PC tem NVIDIA/AMD + iGPU."""
+        self.adapter_name = ""
+        ranked = []
+        factory = ctypes.c_void_p()
+        try:
+            dxgi = ctypes.WinDLL("dxgi")
+            iid = _guid("770aae78-f26f-4dba-a829-253c83d1b387")
+            if dxgi.CreateDXGIFactory1(ctypes.byref(iid), ctypes.byref(factory)) >= 0 and factory.value:
+                for adapter_index in range(16):
+                    adapter = ctypes.c_void_p()
+                    if _com(factory, 7, ctypes.c_long, ctypes.c_uint, ctypes.POINTER(ctypes.c_void_p))(
+                        factory, adapter_index, ctypes.byref(adapter),
+                    ) < 0 or not adapter.value:
+                        break
+                    desc = _DXGI_ADAPTER_DESC()
+                    if _com(adapter, 8, ctypes.c_long, ctypes.POINTER(_DXGI_ADAPTER_DESC))(
+                        adapter, ctypes.byref(desc),
+                    ) < 0:
+                        _release(adapter)
+                        continue
+                    score = dxgi_adapter_capture_score(
+                        desc.Description, desc.VendorId, desc.DedicatedVideoMemory,
+                    )
+                    if score < 0:
+                        _release(adapter)
+                        continue
+                    ranked.append((score, str(desc.Description or ""), adapter))
+                ranked.sort(key=lambda row: row[0], reverse=True)
+                picked = False
+                for _score, name, adapter in ranked:
+                    if (
+                        not picked
+                        and d3d11.D3D11CreateDevice(
+                            adapter, 0, None, 0x20, None, 0, 7,
+                            ctypes.byref(self.d3d_device), None, ctypes.byref(self.d3d_ctx),
+                        ) >= 0
+                        and self.d3d_device.value
+                    ):
+                        self.adapter_name = name
+                        picked = True
+                    _release(adapter)
+                ranked.clear()
+                if picked:
+                    return True
+                self.d3d_device = ctypes.c_void_p()
+                self.d3d_ctx = ctypes.c_void_p()
+        except Exception:
+            for _score, _name, adapter in ranked:
+                try:
+                    if adapter.value:
+                        _release(adapter)
+                except Exception:
+                    pass
+            ranked.clear()
+            self.d3d_device = ctypes.c_void_p()
+            self.d3d_ctx = ctypes.c_void_p()
+        finally:
+            if factory.value:
+                try:
+                    _release(factory)
+                except Exception:
+                    pass
+
+        if d3d11.D3D11CreateDevice(
+            None, 1, None, 0x20, None, 0, 7,
+            ctypes.byref(self.d3d_device), None, ctypes.byref(self.d3d_ctx),
+        ) >= 0 and self.d3d_device.value:
+            if not self.adapter_name:
+                self.adapter_name = "padrao"
+            return True
+        return False
 
     def open(self):
+        self.fail_reason = ""
         if not self.hwnd:
+            self.fail_reason = "sem-hwnd"
             return False
         try:
             combase = ctypes.WinDLL("combase")
@@ -1741,10 +1963,8 @@ class _WGCWindowGrabber:
             combase.RoGetActivationFactory.argtypes = [ctypes.c_void_p, ctypes.POINTER(_GUID), ctypes.POINTER(ctypes.c_void_p)]
             combase.RoGetActivationFactory.restype = ctypes.c_long
 
-            if d3d11.D3D11CreateDevice(
-                None, 1, None, 0x20, None, 0, 7,
-                ctypes.byref(self.d3d_device), None, ctypes.byref(self.d3d_ctx),
-            ) < 0 or not self.d3d_device.value:
+            if not self._open_d3d_device(d3d11):
+                self.fail_reason = "d3d"
                 self.close()
                 return False
 
@@ -1752,6 +1972,7 @@ class _WGCWindowGrabber:
             if _com(self.d3d_device, 0, ctypes.c_long, ctypes.POINTER(_GUID), ctypes.POINTER(ctypes.c_void_p))(
                 self.d3d_device, ctypes.byref(iid_dxgi_dev), ctypes.byref(self.dxgi_dev),
             ) < 0 or not self.dxgi_dev.value:
+                self.fail_reason = "dxgi-dev"
                 self.close()
                 return False
 
@@ -1759,6 +1980,7 @@ class _WGCWindowGrabber:
             create_winrt.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
             create_winrt.restype = ctypes.c_long
             if create_winrt(self.dxgi_dev, ctypes.byref(self.winrt_d3d)) < 0 or not self.winrt_d3d.value:
+                self.fail_reason = "winrt-d3d"
                 self.close()
                 return False
 
@@ -1774,12 +1996,14 @@ class _WGCWindowGrabber:
                 if hs.value:
                     combase.WindowsDeleteString(hs)
             if not interop.value:
+                self.fail_reason = "interop"
                 self.close()
                 return False
             try:
                 if _com(interop, 3, ctypes.c_long, wintypes.HWND, ctypes.POINTER(_GUID), ctypes.POINTER(ctypes.c_void_p))(
                     interop, self.hwnd, ctypes.byref(iid_item), ctypes.byref(self.item),
                 ) < 0 or not self.item.value:
+                    self.fail_reason = "item"
                     self.close()
                     return False
             finally:
@@ -1787,6 +2011,7 @@ class _WGCWindowGrabber:
 
             sz = _WGCSizeInt32()
             if _com(self.item, 7, ctypes.c_long, ctypes.POINTER(_WGCSizeInt32))(self.item, ctypes.byref(sz)) < 0:
+                self.fail_reason = "tamanho"
                 self.close()
                 return False
             w = max(64, int(sz.Width))
@@ -1805,6 +2030,7 @@ class _WGCWindowGrabber:
                 if hs2.value:
                     combase.WindowsDeleteString(hs2)
             if not pool_statics.value:
+                self.fail_reason = "pool-statics"
                 self.close()
                 return False
             try:
@@ -1812,6 +2038,7 @@ class _WGCWindowGrabber:
                     pool_statics, 6, ctypes.c_long,
                     ctypes.c_void_p, ctypes.c_int32, ctypes.c_int32, _WGCSizeInt32, ctypes.POINTER(ctypes.c_void_p),
                 )(pool_statics, self.winrt_d3d, 87, 2, sz, ctypes.byref(self.pool)) < 0 or not self.pool.value:
+                    self.fail_reason = "pool"
                     self.close()
                     return False
             finally:
@@ -1820,6 +2047,7 @@ class _WGCWindowGrabber:
             if _com(self.pool, 10, ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p))(
                 self.pool, self.item, ctypes.byref(self.session),
             ) < 0 or not self.session.value:
+                self.fail_reason = "sessao"
                 self.close()
                 return False
 
@@ -1848,15 +2076,18 @@ class _WGCWindowGrabber:
                     _release(sess3)
 
             if not self.borderless_ok:
+                self.fail_reason = "borda"
                 self.close()
                 return False
 
             if _com(self.session, 6, ctypes.c_long)(self.session) < 0:
+                self.fail_reason = "start"
                 self.close()
                 return False
             self.active = True
             return True
-        except Exception:
+        except Exception as error:
+            self.fail_reason = f"excecao:{type(error).__name__}"
             self.close()
             return False
 
@@ -2480,6 +2711,18 @@ class WindowVideoFeeder:
 
         wgc = _WGCWindowGrabber(self.hwnd)
         use_wgc = wgc.open()
+        wgc_miss = 0
+        miss_limit = wgc_miss_limit(self.fps)
+        if use_wgc:
+            log_event(
+                f"janela wgc gpu={wgc.adapter_name or '?'} "
+                f"hwnd={self.hwnd} pid={self.pid} exe={self.exe or '-'} fps={self.fps}"
+            )
+        else:
+            log_event(
+                f"janela PrintWindow motivo={wgc.fail_reason or '?'} "
+                f"hwnd={self.hwnd} pid={self.pid} exe={self.exe or '-'} fps={self.fps}"
+            )
 
         def client_size():
             box = RECT()
@@ -2530,12 +2773,24 @@ class WindowVideoFeeder:
                         wgc.close()
                         wgc = _WGCWindowGrabber(self.hwnd)
                         use_wgc = wgc.open()
+                        wgc_miss = 0
                         fitted_size = settled
                         src_size = (0, 0)
                     if use_wgc:
                         grabbed = wgc.grab_into_hdc(dst_dc, self.width, self.height, ctypes.byref(bmi), dst_bits.value)
                         if grabbed:
                             self._wgc_seen = True
+                            wgc_miss = 0
+                        else:
+                            wgc_miss += 1
+                            if wgc_miss >= miss_limit:
+                                log_event(
+                                    f"wgc sem quadro, PrintWindow gpu={wgc.adapter_name or '?'} "
+                                    f"miss={wgc_miss} hwnd={self.hwnd} exe={self.exe or '-'}"
+                                )
+                                wgc.close()
+                                use_wgc = False
+                                wgc_miss = 0
                     if not grabbed and not use_wgc:
                         crect = RECT()
                         user32.GetClientRect(self.hwnd, ctypes.byref(crect))
@@ -2610,6 +2865,7 @@ class WindowVideoFeeder:
                             wgc.close()
                             wgc = _WGCWindowGrabber(self.hwnd)
                             use_wgc = wgc.open()
+                            wgc_miss = 0
                             src_size = (0, 0)
                             fresh_w, fresh_h = client_size()
                             size_sample = (fresh_w, fresh_h) if fresh_w > 8 and fresh_h > 8 else (0, 0)
@@ -6233,7 +6489,12 @@ class App(QWidget):
         last_error = "A transmissão caiu."
         self.live_nick = nick
         self.live_host = host if site_on else ""
-        log_event(f"inicio apelido={nick} {width}x{height} fps={fps} pc={pc_audio or '-'} mic={mic or '-'}")
+        log_event(
+            f"inicio apelido={nick} {width}x{height} fps={fps} "
+            f"pc={pc_audio or '-'} mic={mic or '-'} {windows_build_log()}"
+        )
+        adapters = list_dxgi_adapters()
+        log_event(format_dxgi_adapters_log(adapters, pick_best_dxgi_adapter(adapters)))
         if site_on:
             notify_publisher(host, nick, self.publish.get("user", ""), self.publish.get("password", ""), "claim")
         live_audio = None
@@ -6270,7 +6531,7 @@ class App(QWidget):
             note = ""
         self._capture_mode = prefer_capture(ffmpeg_filters(ffmpeg))
         self._gpu_scale = probe_gpu_scale(ffmpeg) if self._capture_mode == "ddagrab" else ""
-        log_event(f"captura {self._capture_mode} escala={self._gpu_scale or 'memoria'}")
+        log_event(f"captura prefer={self._capture_mode} escala={self._gpu_scale or 'memoria'}")
         preferred = None
         try:
             while not self.stopping:
@@ -6604,7 +6865,13 @@ class App(QWidget):
             has_switch = self._switch_to is not None or getattr(self, "_switch_quality", None) is not None
             if self.stopping or video_exited or stalled or (has_switch and self._switch_ready):
                 if (stalled or video_exited) and not self.stopping:
-                    log_event("captura parada, retomando")
+                    why = "travou" if stalled else "ffmpeg-saiu"
+                    log_event(
+                        f"captura parada, retomando motivo={why} "
+                        f"modo={getattr(self, '_live_mode', '-')} "
+                        f"encoder={getattr(self, '_live_encoder', '-')} "
+                        f"frames={getattr(self, '_frame_seen', 0)}"
+                    )
                 self._kill_ffmpeg()
                 try:
                     proc.wait(timeout=3)
@@ -6739,7 +7006,14 @@ class App(QWidget):
 
     def _open_capture(self, ffmpeg, mode, encoder, fps, monitor, output_idx, url, live_audio, note, width, height):
         self._av_ticket += 1
+        self._live_mode = mode
+        self._live_encoder = encoder
         mon = dict(monitor)
+        log_event(
+            f"captura modo={mode} encoder={encoder} prefer={getattr(self, '_capture_mode', '-') or '-'} "
+            f"escala={getattr(self, '_gpu_scale', '') or 'memoria'} "
+            f"{width}x{height} fps={fps} {format_capture_target_log(mon)}"
+        )
         feeder = None
         if mode == "window":
             vpipe = rf"\\.\pipe\spartan-vid-{os.getpid()}-{self._av_ticket}"
@@ -6822,15 +7096,21 @@ class App(QWidget):
         self.video_reader.start()
         self.progress_reader = threading.Thread(target=self._read_progress, args=(video,), daemon=True)
         self.progress_reader.start()
-        if not started.wait(4):
+        wait_s = capture_clock_wait_s(mode)
+        if not started.wait(wait_s):
             self._kill_ffmpeg()
             live_audio.detach()
             self.video_proc = None
             self.last_error = lines[-1] if lines else "A imagem não informou o horário."
+            detail = self.last_error[:220] if self.last_error else "-"
+            log_event(
+                f"imagem sem horario modo={mode} encoder={encoder} espera={wait_s}s "
+                f"frames={getattr(self, '_frame_seen', 0)} detail={detail}"
+            )
             return False
         started_at = clock["t"]
         live_audio.attach(lambda: time.time() - started_at)
-        log_event("som na ordem da captura")
+        log_event(f"som na ordem da captura modo={mode} encoder={encoder}")
         try:
             mux = self._spawn(
                 build_mux_command(
