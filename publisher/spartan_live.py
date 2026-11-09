@@ -2075,11 +2075,8 @@ class _WGCWindowGrabber:
                 finally:
                     _release(sess3)
 
-            if not self.borderless_ok:
-                self.fail_reason = "borda"
-                self.close()
-                return False
-
+            # Sem API de borda (ou se falhar), o WGC segue mesmo assim.
+            # PrintWindow em jogo DirectX costuma travar; a borda amarela é o menor mal.
             if _com(self.session, 6, ctypes.c_long)(self.session) < 0:
                 self.fail_reason = "start"
                 self.close()
@@ -2714,8 +2711,9 @@ class WindowVideoFeeder:
         wgc_miss = 0
         miss_limit = wgc_miss_limit(self.fps)
         if use_wgc:
+            borda = "oculta" if wgc.borderless_ok else "amarela"
             log_event(
-                f"janela wgc gpu={wgc.adapter_name or '?'} "
+                f"janela wgc gpu={wgc.adapter_name or '?'} borda={borda} "
                 f"hwnd={self.hwnd} pid={self.pid} exe={self.exe or '-'} fps={self.fps}"
             )
         else:
