@@ -295,6 +295,63 @@ export function pickNextGif(list, currentIndex) {
   return { index: nextIndex, src: items[nextIndex] };
 }
 
+export const GIF_LOOPS = 5;
+
+export function gifLoopMs(bytes) {
+  if (!bytes || bytes.length < 13) return 0;
+  const sig = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]);
+  if (sig !== "GIF87a" && sig !== "GIF89a") return 0;
+  const screenPacked = bytes[10];
+  let offset = 13 + ((screenPacked & 0x80) ? 3 * (1 << ((screenPacked & 7) + 1)) : 0);
+  let totalCs = 0;
+  let frames = 0;
+  while (offset < bytes.length) {
+    const marker = bytes[offset];
+    if (marker === 0x3b) break;
+    if (marker === 0x21) {
+      const label = bytes[offset + 1];
+      offset += 2;
+      if (label === 0xf9 && offset < bytes.length && bytes[offset] === 4) {
+        let delay = bytes[offset + 2] | (bytes[offset + 3] << 8);
+        if (delay < 2) delay = 10;
+        totalCs += delay;
+        frames += 1;
+      }
+      while (offset < bytes.length) {
+        const size = bytes[offset];
+        offset += 1;
+        if (size === 0) break;
+        offset += size;
+      }
+      continue;
+    }
+    if (marker === 0x2c) {
+      if (offset + 10 > bytes.length) break;
+      const imagePacked = bytes[offset + 9];
+      offset += 10 + ((imagePacked & 0x80) ? 3 * (1 << ((imagePacked & 7) + 1)) : 0);
+      if (offset >= bytes.length) break;
+      offset += 1;
+      while (offset < bytes.length) {
+        const size = bytes[offset];
+        offset += 1;
+        if (size === 0) break;
+        offset += size;
+      }
+      continue;
+    }
+    break;
+  }
+  if (!frames) return 0;
+  return totalCs * 10;
+}
+
+export function gifCarouselWaitMs(loopMs, loops = GIF_LOOPS) {
+  const times = Number.isFinite(Number(loops)) && Number(loops) > 0 ? Number(loops) : GIF_LOOPS;
+  const loop = Number(loopMs);
+  if (!Number.isFinite(loop) || loop <= 0) return 1000 * times;
+  return loop * times;
+}
+
 export function pairStacks(count, viewWidth, screenWidth) {
   if (Number(count) !== 2) return false;
   const view = Number(viewWidth);

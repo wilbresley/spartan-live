@@ -2,7 +2,7 @@ import { formatOnAir, isFollowingLive, liveLedSynced, playbackGlitch, rewindWind
 import { guestEndMessage, guestRemainLabel, PERMANENT_HOLD_MS } from "./guest-link.mjs";
 import { cleanNick, kindMark, NICK_KEY, sortPeople } from "./nick-tag.mjs";
 import { dueChimes, freshArrivals, nextPresence } from "./presence.mjs";
-import { createRailState, railAfterEmpty, railAfterHover, railAfterPinToggle, visualRailOpen } from "./rail-peek.mjs";
+import { createRailState, railAfterEmpty } from "./rail-peek.mjs";
 import { claimReturn, pruneReturns, rememberReturn } from "./quick-return.mjs";
 import { screenPhase } from "./screen-switch.mjs";
 import {
@@ -22,6 +22,8 @@ import {
   HEADER_COMPACT_PX,
   headerShouldCompact,
   pickNextGif,
+  gifLoopMs,
+  gifCarouselWaitMs,
   pairStacks,
   pointerHasHover,
   readPeerVolume,
@@ -38,6 +40,14 @@ import {
   tickToastQueue,
   volumeTapAction,
 } from "./theater.mjs";
+import {
+  VIEW_MOBILE,
+  VIEW_PC,
+  nextViewMode,
+  readViewMode,
+  rememberViewMode,
+  viewModeLabel,
+} from "./view-mode.mjs";
 
 const loginView = document.querySelector("#login-view");
 const passwordView = document.querySelector("#password-view");
@@ -55,6 +65,10 @@ const videoContainer = document.querySelector("#video-container");
 const railWrap = document.querySelector("#rail-wrap");
 const railToggle = document.querySelector("#rail-toggle");
 const rail = document.querySelector("#live-rail");
+const jokeBar = document.querySelector("#joke-bar");
+const pcLivesShade = document.querySelector("#pc-lives-shade");
+const pcLivesClose = document.querySelector("#pc-lives-close");
+const pcLivesPin = document.querySelector("#pc-lives-pin");
 const peersEl = document.querySelector("#peers");
 const hiddenLives = document.querySelector("#hidden-lives");
 const empty = document.querySelector("#empty");
@@ -78,6 +92,10 @@ const nickAsk = document.querySelector("#nick-ask");
 const nickForm = document.querySelector("#nick-form");
 const nickInput = document.querySelector("#nick-input");
 const nickError = document.querySelector("#nick-error");
+const viewAsk = document.querySelector("#view-ask");
+const viewPickPc = document.querySelector("#view-pick-pc");
+const viewPickMobile = document.querySelector("#view-pick-mobile");
+const viewModeToggle = document.querySelector("#view-mode-toggle");
 const guestHours = document.querySelector("#guest-hours");
 const guestPermSlot = document.querySelector("#guest-permanent");
 const guestTempSlot = document.querySelector("#guest-temporary");
@@ -91,6 +109,38 @@ const guestViewerStatus = document.querySelector("#guest-viewer-status");
 const guestGone = document.querySelector("#guest-gone");
 const guestGoneGif = document.querySelector("#guest-gone-gif");
 const gridNamesButton = document.querySelector("#grid-names");
+const mApp = document.querySelector("#m-app");
+const mTitle = document.querySelector("#m-title");
+const mSub = document.querySelector("#m-sub");
+const mScreen = document.querySelector("#m-screen");
+const mFilm = document.querySelector("#m-film");
+const mShade = document.querySelector("#m-shade");
+const mDrawer = document.querySelector("#m-drawer");
+const mDrawerTitle = document.querySelector("#m-drawer-title");
+const mLives = document.querySelector("#m-drawer-lives");
+const mBurger = document.querySelector("#m-burger");
+const mGearBtn = document.querySelector("#m-gear");
+const mDrawerClose = document.querySelector("#m-drawer-close");
+const mTheaterX = document.querySelector("#m-theater-x");
+const mSettings = document.querySelector("#m-settings");
+const mobileHomes = new Map();
+
+function pinMobileHome(node) {
+  if (!node || mobileHomes.has(node)) return;
+  mobileHomes.set(node, { parent: node.parentElement, next: node.nextSibling });
+}
+
+function restoreMobileHome(node) {
+  const home = mobileHomes.get(node);
+  if (!node || !home?.parent) return;
+  if (home.next && home.next.parentElement === home.parent) home.parent.insertBefore(node, home.next);
+  else home.parent.append(node);
+}
+
+pinMobileHome(hiddenLives);
+pinMobileHome(empty);
+pinMobileHome(videoContainer);
+pinMobileHome(rail);
 
 function pointerCanHover() {
   return pointerHasHover(
@@ -99,7 +149,216 @@ function pointerCanHover() {
   );
 }
 
+function storedViewMode() {
+  return readViewMode(window.localStorage);
+}
+
+function isMobileView() {
+  return storedViewMode() === VIEW_MOBILE || document.body.classList.contains("view-mobile");
+}
+
+function paintViewModeButton() {
+  if (!viewModeToggle) return;
+  const mode = storedViewMode() || VIEW_PC;
+  viewModeToggle.textContent = viewModeLabel(mode);
+}
+
+function closeMobileDrawer() {
+  mDrawer?.classList.remove("is-open");
+  mDrawer?.setAttribute("aria-hidden", "true");
+  mShade?.classList.add("hidden");
+}
+
+function openLivesSheet() {
+  if (!isMobileView()) return;
+  if (mDrawer?.classList.contains("is-open")) {
+    closeMobileDrawer();
+    return;
+  }
+  mSettings?.classList.add("hidden");
+  mDrawer?.classList.add("is-open");
+  mDrawer?.setAttribute("aria-hidden", "false");
+  mShade?.classList.remove("hidden");
+}
+
+function openMobileSettings() {
+  if (!isMobileView()) return;
+  closeMobileDrawer();
+  mSettings?.classList.remove("hidden");
+  paintMobileSettings();
+}
+
+function closeMobileSettings() {
+  mSettings?.classList.remove("is-open");
+  mSettings?.classList.add("hidden");
+  document.querySelector("#pc-shade")?.classList.add("hidden");
+}
+
+function openPcSettings() {
+  setPcLives(false);
+  settingsPop?.classList.add("hidden");
+  document.querySelector("#pc-shade")?.classList.remove("hidden");
+  mSettings?.classList.remove("hidden");
+  requestAnimationFrame(() => mSettings?.classList.add("is-open"));
+  paintMobileSettings();
+}
+
+function pinMobileFrame() {
+  const vv = window.visualViewport;
+  if (!mApp) return;
+  if (!isMobileView() || !vv) {
+    mApp.style.top = "";
+    mApp.style.left = "";
+    mApp.style.width = "";
+    mApp.style.height = "";
+    return;
+  }
+  mApp.style.top = `${vv.offsetTop}px`;
+  mApp.style.left = `${vv.offsetLeft}px`;
+  mApp.style.width = `${vv.width}px`;
+  mApp.style.height = `${vv.height}px`;
+}
+
+function keepFieldVisible(target) {
+  const el = target || document.activeElement;
+  if (!el || (el.tagName !== "INPUT" && el.tagName !== "TEXTAREA")) return;
+  window.setTimeout(() => {
+    el.scrollIntoView({ block: "center", inline: "nearest" });
+  }, 280);
+}
+
+function paintMobileChrome() {
+  if (!mApp) return;
+  const on = isMobileView();
+  mApp.classList.toggle("hidden", !on);
+  mApp.setAttribute("aria-hidden", on ? "false" : "true");
+  if (!on) return;
+  const watching = visiblePeers();
+  const focused = watching.find((peer) => peer.el.classList.contains("peer-focus")) || watching[watching.length - 1];
+  if (mTitle) mTitle.textContent = mobileGrid && watching.length > 1 ? "Spartan Live" : (focused?.name || "Spartan Live");
+  if (mSub) {
+    mSub.textContent = count?.textContent || "";
+    mSub.className = count?.className || "";
+  }
+  const theaterOn = theaterActive(theaterState);
+  mApp.classList.toggle("is-theater", theaterOn);
+  mTheaterX?.classList.toggle("hidden", !theaterOn);
+  pinMobileFrame();
+  paintMobileSettings();
+  if (!mFilm) return;
+  mFilm.replaceChildren();
+  mFilm.classList.toggle("hidden", watching.length < 2 || theaterOn);
+  const gridButton = document.createElement("button");
+  gridButton.type = "button";
+  gridButton.textContent = "Grid";
+  gridButton.classList.toggle("is-on", mobileGrid);
+  gridButton.addEventListener("click", () => {
+    mobileGrid = true;
+    manualFocus = null;
+    syncLiveFocus();
+    resizePeers();
+    paintMobileChrome();
+  });
+  mFilm.append(gridButton);
+  for (const peer of watching) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = peer.name;
+    button.classList.toggle("is-on", !mobileGrid && peer === focused);
+    button.addEventListener("click", () => {
+      mobileGrid = false;
+      manualFocus = peer.name;
+      syncLiveFocus();
+      resizePeers();
+      paintMobileChrome();
+    });
+    mFilm.append(button);
+  }
+}
+
+function paintMobileSettings() {
+  if (!mSettings || mSettings.classList.contains("hidden")) return;
+  const guestView = document.body.dataset.guest === "1";
+  document.querySelector("#m-set-invites")?.classList.toggle("hidden", guestView);
+  document.querySelector("#m-set-account")?.classList.toggle("m-guest", guestView);
+  const guestLine = document.querySelector("#m-set-guest");
+  if (guestLine) {
+    const status = guestViewerStatus && !guestViewerStatus.classList.contains("hidden") ? guestViewerStatus.textContent : "";
+    guestLine.textContent = status ? `Convite ${status}` : "";
+    guestLine.classList.toggle("hidden", !guestView || !status);
+  }
+  const theaterVal = document.querySelector("#m-set-theater-val");
+  if (theaterVal) theaterVal.textContent = theaterActive(theaterState) ? "Ligado" : "Desligado";
+  const chimeVal = document.querySelector("#m-set-chimes-val");
+  if (chimeVal) chimeVal.textContent = chimesEnabled() ? "Ligados" : "Desligados";
+  const namesVal = document.querySelector("#m-set-names-val");
+  if (namesVal) namesVal.textContent = gridNamesVisible() ? "Visíveis" : "Ocultos";
+  const modeBtn = document.querySelector("#m-set-mode");
+  if (modeBtn) {
+    const onMobile = isMobileView();
+    const span = modeBtn.querySelector("span");
+    const em = modeBtn.querySelector("em");
+    if (span) span.textContent = onMobile ? "Ver como no computador" : "Ver no celular";
+    if (em) em.textContent = onMobile ? "Modo PC" : "Modo Mobile";
+  }
+  const picking = Boolean(guestPicking && !guestView && !guestTempInvite);
+  const linkVal = document.querySelector("#m-set-link-val");
+  if (linkVal) linkVal.textContent = picking ? "Fechar" : "Abrir";
+  document.querySelector("#m-set-hours")?.classList.toggle("hidden", !picking);
+  const tempOn = Boolean(guestTempSlot && !guestTempSlot.classList.contains("hidden"));
+  document.querySelector("#m-set-temp")?.classList.toggle("hidden", !tempOn);
+  const clock = document.querySelector("#m-set-clock");
+  if (clock) clock.textContent = guestClock?.textContent || "";
+  const permOn = Boolean(guestPermSlot && !guestPermSlot.classList.contains("hidden"));
+  document.querySelector("#m-set-perm")?.classList.toggle("hidden", !permOn);
+  const note = document.querySelector("#m-set-note");
+  if (note) {
+    const warn = document.querySelector("#guest-warn");
+    note.textContent = warn && !warn.classList.contains("hidden") ? warn.textContent : "";
+  }
+}
+
+function mountMobile() {
+  if (!mScreen || !mLives) return;
+  mScreen.append(empty, videoContainer);
+  mLives.append(hiddenLives, rail);
+  rail?.classList.remove("hidden");
+  closeMobileDrawer();
+  closeMobileSettings();
+  pinMobileFrame();
+}
+
+function unmountMobile() {
+  closeMobileDrawer();
+  closeMobileSettings();
+  restoreMobileHome(videoContainer);
+  restoreMobileHome(empty);
+  restoreMobileHome(hiddenLives);
+  restoreMobileHome(rail);
+  mApp?.classList.add("hidden");
+  mApp?.classList.remove("is-theater");
+  mTheaterX?.classList.add("hidden");
+  pinMobileFrame();
+}
+
+function applyViewMode(mode) {
+  const next = rememberViewMode(window.localStorage, mode) || VIEW_PC;
+  const mobile = next === VIEW_MOBILE;
+  document.body.classList.toggle("view-mobile", mobile);
+  document.body.classList.toggle("view-pc", next === VIEW_PC);
+  if (mobile) mountMobile();
+  else unmountMobile();
+  paintViewModeButton();
+  packHeader();
+  resizePeers();
+  syncLiveFocus();
+  paintRail();
+  paintMobileChrome();
+  if (!mobile && settingsPop && !settingsPop.classList.contains("hidden")) placeSettings();
+}
+
 function packHeader() {
+  if (isMobileView()) return;
   const compact = headerShouldCompact(window.innerWidth, HEADER_COMPACT_PX);
   document.body.classList.toggle("header-compact", compact);
   if (!headerActions || !headerOverflow || !guestTools || !theaterButton || !gridButton || !logoutButton || !settingsButton) return;
@@ -157,19 +416,57 @@ function advanceHappyGif() {
   }
 }
 
-let emptyRotateTimer = 0;
+const gifDurationCache = new Map();
+let gifCarouselTimer = 0;
+let gifCarouselToken = 0;
+let gifCarouselMode = "";
+
+async function gifDuration(src) {
+  if (gifDurationCache.has(src)) return gifDurationCache.get(src);
+  try {
+    const response = await fetch(src, { credentials: "same-origin" });
+    if (!response.ok) throw new Error("gif");
+    const duration = gifLoopMs(new Uint8Array(await response.arrayBuffer()));
+    const loop = duration > 0 ? duration : 1000;
+    gifDurationCache.set(src, loop);
+    return loop;
+  } catch {
+    return 1000;
+  }
+}
+
 function stopEmptyRotate() {
-  window.clearInterval(emptyRotateTimer);
-  emptyRotateTimer = 0;
+  gifCarouselToken += 1;
+  gifCarouselMode = "";
+  window.clearTimeout(gifCarouselTimer);
+  gifCarouselTimer = 0;
+}
+
+function armGifCarousel(mode) {
+  if (gifCarouselMode === mode) return;
+  gifCarouselMode = mode;
+  const token = ++gifCarouselToken;
+  window.clearTimeout(gifCarouselTimer);
+  gifCarouselTimer = 0;
+  const step = async () => {
+    const list = mode === "happy" ? HAPPY_GIFS : SAD_GIFS;
+    const index = mode === "happy" ? happyGifIndex : sadGifIndex;
+    const src = list[index] || list[0];
+    const loop = await gifDuration(src);
+    if (token !== gifCarouselToken) return;
+    gifCarouselTimer = window.setTimeout(() => {
+      if (token !== gifCarouselToken) return;
+      if (!empty || empty.classList.contains("hidden")) return;
+      if (mode === "happy") advanceHappyGif();
+      else advanceSadGif();
+      step();
+    }, gifCarouselWaitMs(loop));
+  };
+  step();
 }
 
 function startEmptyRotate() {
-  stopEmptyRotate();
-  emptyRotateTimer = window.setInterval(() => {
-    if (!empty || empty.classList.contains("hidden")) return;
-    if (currentEmptyMode === "happy") advanceHappyGif();
-    else advanceSadGif();
-  }, 5000);
+  armGifCarousel(currentEmptyMode === "happy" ? "happy" : "sad");
 }
 
 if (emptyGif) {
@@ -553,6 +850,7 @@ let audienceCache = [];
 let audienceLive = "";
 let manualFocus = null;
 let autoFocus = false;
+let mobileGrid = false;
 
 function storedNick() {
   try { return cleanNick(localStorage.getItem(NICK_KEY) || ""); } catch { return ""; }
@@ -580,10 +878,12 @@ function showGuestWarn(text) {
   if (!guestWarn) return;
   guestWarn.textContent = text;
   guestWarn.classList.remove("hidden");
+  paintMobileSettings();
   window.clearTimeout(guestWarnTimer);
   guestWarnTimer = window.setTimeout(() => {
     guestWarn.classList.add("hidden");
     guestWarn.textContent = "";
+    paintMobileSettings();
   }, 4000);
 }
 
@@ -591,11 +891,16 @@ function nickGateOpen() {
   return Boolean(nickAsk && !nickAsk.classList.contains("hidden"));
 }
 
+function viewGateOpen() {
+  return Boolean(viewAsk && !viewAsk.classList.contains("hidden"));
+}
+
 function showNickGate() {
   if (!nickAsk) return;
   loginView.classList.add("hidden");
   passwordView.classList.add("hidden");
   appView.classList.add("hidden");
+  viewAsk?.classList.add("hidden");
   nickAsk.classList.remove("hidden");
   if (nickInput) nickInput.value = "";
   if (nickError) nickError.textContent = "";
@@ -606,6 +911,31 @@ function hideNickGate() {
   nickAsk?.classList.add("hidden");
 }
 
+function showViewModeAsk() {
+  if (!viewAsk) {
+    applyViewMode(VIEW_PC);
+    return finishEnterApp();
+  }
+  loginView.classList.add("hidden");
+  passwordView.classList.add("hidden");
+  appView.classList.add("hidden");
+  hideNickGate();
+  viewAsk.classList.remove("hidden");
+}
+
+function hideViewModeAsk() {
+  viewAsk?.classList.add("hidden");
+}
+
+function finishEnterApp() {
+  hideNickGate();
+  hideViewModeAsk();
+  showApp();
+  paintGuest();
+  if (viewerRole === "owner") return loadGuestBar().then(() => refresh());
+  return refresh();
+}
+
 function enterApp() {
   hideGuestGone();
   if (!storedNick()) {
@@ -613,10 +943,18 @@ function enterApp() {
     return;
   }
   hideNickGate();
-  showApp();
-  paintGuest();
-  if (viewerRole === "owner") return loadGuestBar().then(() => refresh());
-  return refresh();
+  if (!storedViewMode()) {
+    showViewModeAsk();
+    return;
+  }
+  applyViewMode(storedViewMode());
+  return finishEnterApp();
+}
+
+function chooseViewMode(mode) {
+  applyViewMode(mode);
+  hideViewModeAsk();
+  return finishEnterApp();
 }
 
 function closeAudience() {
@@ -746,6 +1084,7 @@ function paintGuest() {
       guestViewerStatus.textContent = "";
     }
   }
+  paintMobileSettings();
 }
 
 async function loadGuestBar() {
@@ -839,14 +1178,16 @@ function showVideo() {
   empty.classList.toggle("hidden", watching);
   videoContainer.classList.toggle("hidden", !watching);
   if (!watching) {
-    startEmptyRotate();
     if (anyoneOnline) {
-      if (emptyText) emptyText.textContent = "Tem gente ao vivo! Escolha uma live ao lado para assistir.";
+      if (emptyText) {
+        emptyText.textContent = "Tem gente ao vivo. Abre o menu e escolhe uma live.";
+      }
       if (currentEmptyMode !== "happy") advanceHappyGif();
     } else {
       if (emptyText) emptyText.textContent = "Ninguém está transmitindo agora.";
       if (currentEmptyMode !== "sad") advanceSadGif();
     }
+    startEmptyRotate();
   } else {
     stopEmptyRotate();
   }
@@ -857,9 +1198,15 @@ function resizePeers() {
   peersEl.classList.remove("peers-split");
   const count = visibleCount();
   if (count <= 1) return;
-  if (pairStacks(count, window.innerWidth, window.screen?.width || 0)) {
+  if (isMobileView() && count === 2) {
     peersEl.style.gridTemplateColumns = "1fr";
-    peersEl.style.gridTemplateRows = "1fr 1fr";
+    peersEl.style.gridTemplateRows = "repeat(2, minmax(0, 1fr))";
+    return;
+  }
+  const dock = document.body.classList.contains("pc-lives-pinned") ? 220 : 0;
+  if (pairStacks(count, window.innerWidth - dock, window.screen?.width || 0)) {
+    peersEl.style.gridTemplateColumns = "1fr";
+    peersEl.style.gridTemplateRows = `repeat(${count}, minmax(0, 1fr))`;
     return;
   }
   const slots = Math.min(50, count + (count % 2));
@@ -870,11 +1217,33 @@ function resizePeers() {
 function syncLiveFocus() {
   const count = visibleCount();
   if (count === 0) {
+    mobileGrid = false;
     videoContainer.classList.remove("peer-focus-mode");
     delete videoContainer.dataset.spartanAutoFocus;
     autoFocus = false;
     manualFocus = null;
     clearFocusMarks();
+    return;
+  }
+  if (isMobileView()) {
+    if (count < 2) mobileGrid = false;
+    if (mobileGrid) {
+      videoContainer.classList.remove("peer-focus-mode");
+      delete videoContainer.dataset.spartanAutoFocus;
+      autoFocus = false;
+      manualFocus = null;
+      clearFocusMarks();
+      return;
+    }
+    const chosen = manualFocus && peers.get(manualFocus) && !peers.get(manualFocus).hidden
+      ? peers.get(manualFocus)
+      : visiblePeers()[visiblePeers().length - 1];
+    manualFocus = chosen?.name || null;
+    autoFocus = false;
+    delete videoContainer.dataset.spartanAutoFocus;
+    videoContainer.classList.add("peer-focus-mode");
+    clearFocusMarks();
+    chosen?.el.classList.add("peer-focus");
     return;
   }
   if (count === 1) {
@@ -939,6 +1308,7 @@ function refreshGrid() {
   renderHidden();
   renderRail();
   paintRail();
+  paintMobileChrome();
 }
 
 function paintAudience(holder, viewers, guests, permanent = 0) {
@@ -962,12 +1332,12 @@ function renderRail() {
     const button = document.createElement("button");
     button.type = "button";
     const nameSpan = document.createElement("span");
+    nameSpan.className = "rail-name";
     nameSpan.textContent = entry.name;
-    button.append(nameSpan);
     const pair = document.createElement("span");
     pair.className = "audience-pair";
     paintAudience(pair, entry.viewers, entry.guests, entry.permanent);
-    if (!pair.classList.contains("hidden")) button.append(pair);
+    button.append(nameSpan, pair);
     if (peers.has(entry.name)) button.classList.add("on");
     if (entry.offline) button.classList.add("offline");
     button.addEventListener("click", () => toggleWatch(entry.name));
@@ -983,68 +1353,64 @@ function storedRailPinned() {
 
 let railState = createRailState(storedRailPinned());
 let railHadNames = false;
+let pcLivesPinned = Boolean(railState.pinned);
+let pcLivesOpen = pcLivesPinned;
 
-function railForceOpen() {
-  return catalog.size > 0 && visibleCount() === 0;
+function setPcLives(open) {
+  if (!open && pcLivesPinned) return;
+  pcLivesOpen = Boolean(open);
+  paintRail();
 }
 
 function paintRail() {
-  const open = visualRailOpen(railState, { forceOpen: railForceOpen() });
-  railWrap.classList.toggle("is-open", open);
-  rail.classList.toggle("hidden", !open);
-  railToggle.setAttribute("aria-expanded", open ? "true" : "false");
-  const label = railToggle.querySelector(".rail-label");
-  if (label) {
-    if (!open) label.textContent = "Lives";
-    else label.textContent = railState.pinned ? "Desafixar menu" : "Fixar menu";
+  jokeBar?.classList.toggle("hidden", visibleCount() > 0);
+  const docked = pcLivesPinned && pcLivesOpen && !isMobileView();
+  document.body.classList.toggle("pc-lives-pinned", docked);
+  if (isMobileView()) {
+    rail?.classList.remove("hidden");
+    return;
   }
-  const dot = railToggle.querySelector(".rail-dot");
-  if (dot) {
-    const anyone = [...catalog.values()].some((entry) => !entry.offline);
-    dot.classList.toggle("is-on", anyone);
-    dot.classList.toggle("is-off", !anyone);
-  }
+  railWrap?.classList.toggle("is-open", pcLivesOpen);
+  railWrap?.classList.toggle("is-pinned", docked);
+  railWrap?.setAttribute("aria-hidden", pcLivesOpen ? "false" : "true");
+  rail?.classList.toggle("hidden", !pcLivesOpen);
+  railToggle?.setAttribute("aria-expanded", pcLivesOpen ? "true" : "false");
+  pcLivesShade?.classList.toggle("hidden", !pcLivesOpen || docked);
+  pcLivesPin?.classList.toggle("is-on", docked);
+  pcLivesPin?.setAttribute("aria-pressed", docked ? "true" : "false");
+  pcLivesPin?.setAttribute("aria-label", docked ? "Desafixar menu" : "Fixar menu");
+}
+
+function togglePcLivesPin() {
+  pcLivesPinned = !pcLivesPinned;
+  railState = { ...railState, pinned: pcLivesPinned };
+  rememberRail();
+  if (pcLivesPinned) pcLivesOpen = true;
+  paintRail();
+  resizePeers();
 }
 
 function rememberRail() {
   try { localStorage.setItem(RAIL_KEY, railState.pinned ? "pinned" : "auto"); } catch { /* o navegador não guardou */ }
 }
 
-railToggle.addEventListener("click", () => {
-  const open = visualRailOpen(railState, { forceOpen: railForceOpen() });
-  if (!pointerCanHover()) {
-    railState = railAfterPinToggle(railState);
-    rememberRail();
-    paintRail();
-    tickTheater();
-    return;
-  }
-  if (!open && !railForceOpen()) return;
-  railState = railAfterPinToggle(railState);
-  rememberRail();
-  paintRail();
+railToggle?.addEventListener("click", () => {
+  if (isMobileView()) return;
+  if (!pcLivesOpen) closeMobileSettings();
+  setPcLives(!pcLivesOpen);
   tickTheater();
 });
-
-if (railWrap) {
-  railWrap.addEventListener("pointerenter", () => {
-    if (!pointerCanHover()) return;
-    if (arrivalToastOpenNow()) return;
-    railState = railAfterHover(railState, true);
-    paintRail();
-  });
-  railWrap.addEventListener("pointerleave", () => {
-    if (!pointerCanHover()) return;
-    railState = railAfterHover(railState, false);
-    paintRail();
-  });
-}
+pcLivesShade?.addEventListener("click", () => setPcLives(false));
+pcLivesClose?.addEventListener("click", () => setPcLives(false));
+pcLivesPin?.addEventListener("click", () => togglePcLivesPin());
 
 function noteRailEmpty() {
   const next = railAfterEmpty(railState);
   if (next === railState) return;
   railState = next;
+  pcLivesPinned = false;
   rememberRail();
+  paintRail();
 }
 
 paintRail();
@@ -1060,8 +1426,13 @@ window.matchMedia(`(max-width: ${HEADER_COMPACT_PX}px)`).addEventListener("chang
 
 function toggleWatch(name) {
   if (peers.has(name)) removeStream(name);
-  else addStream({ name });
+  else {
+    addStream({ name });
+    if (isMobileView()) manualFocus = name;
+  }
   refreshGrid();
+  if (isMobileView()) closeMobileDrawer();
+  else setPcLives(false);
 }
 
 function silenceVideo(video) {
@@ -1841,14 +2212,14 @@ async function refresh() {
       const railCurrentlyVisible = Boolean(
         !theaterOn &&
         !fullscreenActive &&
-        visualRailOpen(railState, now) &&
+        pcLivesOpen &&
         (!railRect || railRect.width > 0)
       );
       if (shouldUseArrivalToast({ theaterOn, fullscreenActive, railVisible: railCurrentlyVisible })) {
         toastState = enqueueArrivalToasts(toastState, newcomers, now);
         paintArrivalToast();
       }
-      if (visibleCount() === 0) advanceHappyGif();
+      if (visibleCount() === 0 && currentEmptyMode !== "happy") advanceHappyGif();
     }
     if (railHadNames && catalog.size === 0) noteRailEmpty();
     railHadNames = catalog.size > 0;
@@ -1921,6 +2292,7 @@ function paintTheater() {
     theaterButton.classList.toggle("is-on", on);
     theaterButton.setAttribute("aria-pressed", on ? "true" : "false");
   }
+  paintMobileChrome();
 }
 
 if (theaterButton) {
@@ -2098,22 +2470,168 @@ function placeSettings() {
 
 settingsButton.addEventListener("click", (event) => {
   event.stopPropagation();
-  const opening = settingsPop.classList.contains("hidden");
-  settingsPop.classList.toggle("hidden");
-  if (opening) {
-    if (theaterActive(theaterState)) {
-      theaterState = theaterHoldPeek(theaterState, true);
-    }
-    placeSettings();
-    paintChimeButton();
-    paintGridNamesButton();
-    paintTheater();
-  }
+  if (isMobileView()) return;
+  settingsPop?.classList.add("hidden");
+  if (mSettings && !mSettings.classList.contains("hidden")) closeMobileSettings();
+  else openPcSettings();
 });
+document.querySelector("#pc-shade")?.addEventListener("click", closeMobileSettings);
 if (settingsPop) {
   settingsPop.addEventListener("pointerdown", (event) => event.stopPropagation());
   settingsPop.addEventListener("click", (event) => event.stopPropagation());
 }
+viewModeToggle?.addEventListener("click", (event) => {
+  event.stopPropagation();
+  const next = nextViewMode(storedViewMode() || VIEW_PC);
+  applyViewMode(next);
+  paintTheater();
+});
+viewPickPc?.addEventListener("click", () => chooseViewMode(VIEW_PC));
+viewPickMobile?.addEventListener("click", () => chooseViewMode(VIEW_MOBILE));
+mBurger?.addEventListener("click", openLivesSheet);
+mGearBtn?.addEventListener("click", openMobileSettings);
+document.querySelector("#m-settings-back")?.addEventListener("click", closeMobileSettings);
+mDrawerClose?.addEventListener("click", closeMobileDrawer);
+mShade?.addEventListener("click", closeMobileDrawer);
+mTheaterX?.addEventListener("click", () => theaterExit?.click());
+document.querySelector("#m-set-theater")?.addEventListener("click", () => {
+  theaterButton?.click();
+  paintMobileSettings();
+});
+document.querySelector("#m-set-full")?.addEventListener("click", () => {
+  closeMobileSettings();
+  gridButton?.click();
+});
+document.querySelector("#m-set-audience")?.addEventListener("click", () => audienceOpen?.click());
+const mSetLink = document.querySelector("#m-set-link");
+let mLinkHold = 0;
+let mLinkHeld = false;
+let mLinkInside = false;
+mSetLink?.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0) return;
+  mLinkHeld = false;
+  mLinkInside = true;
+  window.clearTimeout(mLinkHold);
+  mLinkHold = window.setTimeout(() => {
+    mLinkHeld = true;
+    mLinkHold = 0;
+    createPermanentInvite();
+  }, PERMANENT_HOLD_MS);
+});
+function finishMobileLinkHold(toggleHours) {
+  window.clearTimeout(mLinkHold);
+  mLinkHold = 0;
+  if (mLinkHeld) {
+    mLinkHeld = false;
+    mLinkInside = false;
+    return;
+  }
+  if (!toggleHours || !mLinkInside) {
+    mLinkInside = false;
+    return;
+  }
+  mLinkInside = false;
+  if (guestTempInvite) {
+    showGuestWarn("já tem temporário");
+    guestPicking = false;
+    paintGuest();
+    return;
+  }
+  guestPicking = !guestPicking;
+  window.clearTimeout(guestPickTimer);
+  paintGuest();
+}
+mSetLink?.addEventListener("pointerup", () => finishMobileLinkHold(true));
+mSetLink?.addEventListener("pointerleave", () => finishMobileLinkHold(false));
+mSetLink?.addEventListener("pointercancel", () => finishMobileLinkHold(false));
+mSetLink?.addEventListener("contextmenu", (event) => event.preventDefault());
+document.querySelector("#m-set-hours")?.addEventListener("click", (event) => {
+  const hours = event.target.closest("button")?.dataset.hours;
+  guestHours?.querySelector(`[data-hours="${hours}"]`)?.click();
+});
+document.querySelector("#m-set-copy")?.addEventListener("click", () => guestCopy?.click());
+document.querySelector("#m-set-revoke")?.addEventListener("click", () => guestRevoke?.click());
+document.querySelector("#m-set-perm-copy")?.addEventListener("click", () => guestPermCopy?.click());
+document.querySelector("#m-set-perm-revoke")?.addEventListener("click", () => guestPermRevoke?.click());
+document.querySelector("#m-set-chimes")?.addEventListener("click", () => {
+  document.querySelector("#chimes")?.click();
+  paintMobileSettings();
+});
+document.querySelector("#m-set-names")?.addEventListener("click", () => {
+  gridNamesButton?.click();
+  paintMobileSettings();
+});
+document.querySelector("#m-set-mode")?.addEventListener("click", () => {
+  applyViewMode(isMobileView() ? VIEW_PC : VIEW_MOBILE);
+});
+function openPasswordModal() {
+  const box = document.querySelector("#password-ask");
+  const errorEl = document.querySelector("#password-modal-error");
+  if (errorEl) errorEl.textContent = "";
+  document.querySelector("#password-modal-form")?.reset();
+  box?.classList.remove("hidden");
+  box?.querySelector("input")?.focus();
+}
+function closePasswordModal() {
+  document.querySelector("#password-ask")?.classList.add("hidden");
+}
+document.querySelector("#password-open")?.addEventListener("click", (event) => {
+  event.stopPropagation();
+  openPasswordModal();
+});
+document.querySelector("#m-set-password-open")?.addEventListener("click", openPasswordModal);
+document.querySelector("#password-modal-cancel")?.addEventListener("click", closePasswordModal);
+document.querySelector("#password-ask")?.addEventListener("click", (event) => {
+  if (event.target === event.currentTarget) closePasswordModal();
+});
+document.querySelector("#password-modal-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const errorEl = document.querySelector("#password-modal-error");
+  try {
+    await changePassword(event.currentTarget, errorEl);
+    errorEl.textContent = "Senha trocada.";
+    window.setTimeout(closePasswordModal, 700);
+  } catch (error) {
+    errorEl.textContent = error.message;
+  }
+});
+function closeDownloadAsk() {
+  document.querySelector("#download-ask")?.classList.add("hidden");
+}
+function mirrorDownloadNote() {
+  window.setTimeout(() => {
+    const note = document.querySelector("#m-set-download-note");
+    const source = document.querySelector("#download-note");
+    if (note && source) note.textContent = source.textContent;
+  }, 400);
+}
+document.querySelector("#m-set-download")?.addEventListener("click", () => {
+  if (isMobileView()) {
+    document.querySelector("#download-ask")?.classList.remove("hidden");
+    return;
+  }
+  document.querySelector("#download")?.click();
+  mirrorDownloadNote();
+});
+document.querySelector("#download-ask-no")?.addEventListener("click", closeDownloadAsk);
+document.querySelector("#download-ask")?.addEventListener("click", (event) => {
+  if (event.target === event.currentTarget) closeDownloadAsk();
+});
+document.querySelector("#download-ask-yes")?.addEventListener("click", () => {
+  closeDownloadAsk();
+  document.querySelector("#download")?.click();
+  mirrorDownloadNote();
+});
+document.querySelector("#m-set-logout")?.addEventListener("click", () => logoutButton?.click());
+document.addEventListener("focusin", (event) => keepFieldVisible(event.target));
+window.visualViewport?.addEventListener("resize", () => {
+  pinMobileFrame();
+  keepFieldVisible();
+});
+window.visualViewport?.addEventListener("scroll", pinMobileFrame);
+mLives?.addEventListener("click", (event) => {
+  if (event.target.closest("button")) closeMobileDrawer();
+});
 
 const gridExit = document.querySelector("#grid-exit");
 let hideGridExit = 0;
@@ -2132,7 +2650,7 @@ gridButton.addEventListener("click", () => {
     document.exitFullscreen();
     return;
   }
-  settingsPop.classList.add("hidden");
+  if (!isMobileView()) settingsPop.classList.add("hidden");
   videoContainer.requestFullscreen().catch(() => {});
 });
 gridExit.addEventListener("click", () => {
@@ -2160,20 +2678,10 @@ if (gridNamesButton) {
 }
 
 document.addEventListener("click", (event) => {
+  if (isMobileView()) return;
   if (settingsPop.classList.contains("hidden")) return;
   if (settingsPop.contains(event.target) || event.target === settingsButton) return;
   settingsPop.classList.add("hidden");
-});
-
-document.querySelector("#gear-password").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const errorEl = document.querySelector("#gear-error");
-  try {
-    await changePassword(event.currentTarget, errorEl);
-    errorEl.textContent = "Senha trocada.";
-  } catch (error) {
-    errorEl.textContent = error.message;
-  }
 });
 
 document.querySelector("#download").addEventListener("click", async () => {
@@ -2358,7 +2866,7 @@ nickForm?.addEventListener("submit", (event) => {
 
 const timer = window.setInterval(() => {
   if (!guestGone.classList.contains("hidden")) return;
-  if (nickGateOpen()) return;
+  if (nickGateOpen() || viewGateOpen()) return;
   if (guestTempInvite || guestPermInvite) paintGuest();
   if (!appView.classList.contains("hidden")) {
     if (viewerRole === "owner") loadGuestBar();

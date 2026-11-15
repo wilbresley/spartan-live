@@ -22,6 +22,8 @@ import {
   headerShouldCompact,
   listRoster,
   pickNextGif,
+  gifLoopMs,
+  gifCarouselWaitMs,
   pairStacks,
   pointerHasHover,
   readPeerVolume,
@@ -196,6 +198,17 @@ test("roleta de gifs de triste e feliz percorre todos os itens sem repetir até 
   }
   assert.equal(new Set(seenSad).size, SAD_GIFS.length);
   assert.equal(pickNextGif(SAD_GIFS, idx).src, SAD_GIFS[0]);
+
+  const oneLoop = Uint8Array.from([
+    0x47, 0x49, 0x46, 0x38, 0x39, 0x61,
+    0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+    0x21, 0xf9, 0x04, 0x00, 0x32, 0x00, 0x00, 0x00,
+    0x2c, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x00,
+    0x3b,
+  ]);
+  assert.equal(gifLoopMs(oneLoop), 500);
+  assert.equal(gifCarouselWaitMs(500), 2500);
+  assert.equal(gifCarouselWaitMs(0), 5000);
 
   let hIdx = -1;
   const seenHappy = [];

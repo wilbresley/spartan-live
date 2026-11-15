@@ -1,0 +1,449 @@
+/* App de celular. Só existe com body.view-mobile. O layout do PC não entra aqui. */
+
+body.view-mobile #app-view {
+  display: none !important;
+}
+
+body.view-mobile #m-app {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  background: #0b0b0b;
+  color: #f3f3f3;
+}
+
+body.view-mobile #m-app.hidden {
+  display: none !important;
+}
+
+body.view-mobile .m-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+  min-height: 56px;
+  padding: max(8px, env(safe-area-inset-top)) 8px 8px;
+  background: #121212;
+  border-bottom: 1px solid #2a2a2a;
+}
+
+body.view-mobile #m-burger,
+body.view-mobile #m-gear,
+body.view-mobile #m-drawer-close,
+body.view-mobile #m-theater-x {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  border: 0;
+  border-radius: 14px;
+  background: #1c1c1c;
+  color: #f6f1f1;
+  font-size: 22px;
+}
+
+body.view-mobile .m-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+
+body.view-mobile .m-brand img {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: #111;
+}
+
+body.view-mobile .m-brand-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+body.view-mobile #m-title {
+  font-size: 16px;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+body.view-mobile #m-sub {
+  font-size: 12px;
+  color: #9a9a9a;
+}
+
+body.view-mobile #m-sub.is-live { color: #3dbe6e; }
+body.view-mobile #m-sub.is-off { color: #f07171; }
+
+body.view-mobile #m-screen {
+  position: relative;
+  z-index: 1;
+  isolation: isolate;
+  flex: 1 1 auto;
+  min-height: 0;
+  background: #000;
+}
+
+body.view-mobile #m-screen #video-container,
+body.view-mobile #m-screen #empty {
+  margin: 0;
+}
+
+body.view-mobile #m-screen #video-container {
+  height: 100%;
+  border-radius: 0;
+}
+
+body.view-mobile #m-screen .peer {
+  border: 0;
+  border-radius: 0;
+}
+
+body.view-mobile #m-screen .peer-name {
+  display: none;
+}
+
+body.view-mobile #m-screen .player-bar,
+body.view-mobile #m-screen .peer-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+body.view-mobile #m-screen .peer-actions button,
+body.view-mobile #m-screen .player-bar .play,
+body.view-mobile #m-screen .live-led,
+body.view-mobile #m-screen .vol .icon-btn {
+  min-width: 46px;
+  min-height: 46px;
+}
+
+body.view-mobile #m-film {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 8px;
+  flex: 0 0 auto;
+  padding: 8px 12px;
+  overflow-x: auto;
+  background: #101010;
+  border-top: 1px solid #2a2a2a;
+}
+
+body.view-mobile #m-film button {
+  flex: 0 0 auto;
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1px solid #343434;
+  border-radius: 999px;
+  background: #1a1a1a;
+  color: #ececec;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+body.view-mobile #m-film button.is-on {
+  border-color: #c14b4b;
+  background: #3a1c1c;
+  color: #fff;
+}
+
+body.view-mobile #m-shade {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+body.view-mobile #m-drawer {
+  position: absolute;
+  z-index: 7;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: min(84vw, 320px);
+  display: flex;
+  flex-direction: column;
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  background: #161616;
+  border-radius: 0 18px 18px 0;
+  box-shadow: 12px 0 32px rgba(0, 0, 0, 0.45);
+  transform: translateX(-105%);
+  visibility: hidden;
+  transition: transform 0.22s ease, visibility 0.22s ease;
+}
+
+body.view-mobile #m-drawer.is-open {
+  transform: translateX(0);
+  visibility: visible;
+}
+
+body.view-mobile .m-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 12px 8px 18px;
+}
+
+body.view-mobile .m-drawer-head strong {
+  font-size: 18px;
+}
+
+body.view-mobile #m-drawer-lives {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 4px 12px 16px;
+}
+
+body.view-mobile #m-drawer #live-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+body.view-mobile #m-drawer #live-rail button,
+body.view-mobile #m-drawer #hidden-lives button {
+  width: 100%;
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 14px;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+body.view-mobile #m-drawer #live-rail button {
+  min-height: 76px;
+  text-align: center;
+}
+
+body.view-mobile #m-drawer #hidden-lives button {
+  min-height: 52px;
+  text-align: left;
+}
+
+body.view-mobile #m-drawer #live-rail button {
+  color: #f3f3f3;
+  background: #1c1c1c;
+  border: 1px solid #343434;
+}
+
+body.view-mobile #m-drawer #live-rail button.on {
+  border-color: #c14b4b;
+  background: #2a1717;
+}
+
+body.view-mobile #m-settings {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  width: auto;
+  display: flex;
+  flex-direction: column;
+  background: #101010;
+  border: 0;
+  box-shadow: none;
+  transform: none;
+}
+
+.m-set-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;
+  padding: max(8px, env(safe-area-inset-top)) 16px 8px 8px;
+  background: #141414;
+  border-bottom: 1px solid #2a2a2a;
+}
+
+.m-set-bar button {
+  width: 48px;
+  height: 48px;
+  border: 0;
+  border-radius: 14px;
+  background: #1c1c1c;
+  color: #f6f1f1;
+  font-size: 22px;
+}
+
+.m-set-bar strong {
+  font-size: 18px;
+}
+
+.m-set-body {
+  flex: 1;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 4px 16px calc(28px + env(safe-area-inset-bottom));
+}
+
+.m-set-group h2 {
+  margin: 18px 4px 8px;
+  color: #9a9a9a;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.m-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-height: 54px;
+  margin-top: 8px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 16px;
+  background: #1c1c1c;
+  color: #f4f4f4;
+  font-size: 16px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.m-row em {
+  flex: 0 0 auto;
+  color: #d0d0d0;
+  font-size: 13px;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.m-row-danger {
+  background: #7a3030;
+}
+
+.m-hours {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.m-hours button,
+.m-invite button,
+.m-invite span {
+  min-height: 48px;
+  border-radius: 14px;
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--line);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+#m-set-copy,
+#m-set-perm-copy {
+  background: #3dbe6e;
+  color: #fff;
+  border-color: #2d9154;
+}
+
+#m-set-revoke,
+#m-set-perm-revoke {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent-2);
+}
+
+.m-invite {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 12px;
+  border-radius: 16px;
+  background: #1c1c1c;
+}
+
+.m-invite span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-variant-numeric: tabular-nums;
+}
+
+body.view-mobile .m-pass {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 14px;
+  border-radius: 16px;
+  background: #1c1c1c;
+}
+
+body.view-mobile .m-pass input {
+  font-size: 16px;
+  scroll-margin-bottom: 40vh;
+}
+
+.m-set-note,
+.m-set-guest {
+  margin: 8px 4px 0;
+  color: #c9c9c9;
+  font-size: 14px;
+}
+
+#m-set-link {
+  touch-action: manipulation;
+  -webkit-touch-callout: none;
+}
+
+#m-set-account.m-guest #m-set-password-open,
+#m-set-account.m-guest #m-set-download,
+#m-set-account.m-guest #m-set-download-note {
+  display: none;
+}
+
+body.view-mobile #m-app.is-theater .m-bar {
+  position: absolute;
+  top: env(safe-area-inset-top);
+  left: 0;
+  right: 0;
+  z-index: 5;
+  background: linear-gradient(rgba(0, 0, 0, 0.72), transparent);
+  border-bottom: 0;
+}
+
+body.view-mobile #m-app.is-theater #m-gear,
+body.view-mobile #m-app.is-theater #m-film {
+  display: none;
+}
+
+body.view-mobile #m-app.is-theater #m-screen {
+  position: absolute;
+  inset: 0;
+}
+
+body.view-mobile #m-theater-x {
+  position: absolute;
+  z-index: 8;
+  top: calc(8px + env(safe-area-inset-top));
+  right: 10px;
+  background: rgba(20, 20, 20, 0.86);
+  border: 1px solid #343434;
+}
+
+body.view-mobile #theater-exit {
+  display: none !important;
+}
+
+body.view-mobile .arrival-toast {
+  top: calc(64px + env(safe-area-inset-top));
+  left: 10px;
+  right: 10px;
+  max-width: none;
+}
