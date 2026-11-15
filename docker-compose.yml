@@ -2,7 +2,7 @@ name: spartan-live
 
 services:
   spartan-live-motor:
-    image: bluenviron/mediamtx:1.21.2
+    image: bluenviron/mediamtx:1.21.3
     container_name: spartan-live-motor
     restart: unless-stopped
     ports:

@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
-python -m pip install --user pyinstaller soxr numpy PySide6
+python -m pip install --user -r requirements.txt
 $extra = @(
   "--exclude-module", "tkinter",
   "--exclude-module", "PySide6.QtQml",

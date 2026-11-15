@@ -8,7 +8,7 @@ O atraso esperado na rede local é de cerca de 5 segundos. O servidor retém 120
 
 | Serviço | Função |
 | --- | --- |
-| `spartan-live-motor` | [MediaMTX](https://github.com/bluenviron/mediamtx) 1.21.2. Recebe RTMP na porta 1935 e gera LL-HLS. |
+| `spartan-live-motor` | [MediaMTX](https://github.com/bluenviron/mediamtx) 1.21.3. Recebe RTMP na porta 1935 e gera LL-HLS. |
 | `spartan-live-site` | Login, proxy do HLS e a página. Escuta 8097 no host e 8080 no container. |
 | `publisher` | Programa Windows. O arquivo único é `SpartanLive.exe`. |
 
@@ -18,7 +18,8 @@ O fluxo é: captura da tela, codificação H.264, MPEG-TS local, mux com AAC e e
 
 - Debian ou Ubuntu, com Docker e o plugin `docker compose`.
 - Windows 10 ou 11, 64 bits, para gerar e rodar o programa.
-- Python 3.12 na máquina que gera o executável.
+- Python 3.12 na máquina que gera o executável (NumPy 2.x, PySide6 6.12).
+- Imagem do site: Node 26 Alpine. Player HLS: hls.js 1.7.x em `site/public/hls.min.js`.
 
 ## Servidor
 
