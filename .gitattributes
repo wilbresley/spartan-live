@@ -1,0 +1,3 @@
+# Os scripts rodam no servidor Linux: precisam de LF, mesmo com o Windows
+# configurado para CRLF (`core.autocrlf`).
+*.sh text eol=lf
