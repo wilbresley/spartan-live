@@ -34,7 +34,7 @@ Entra de novo na sessão para o grupo `docker` valer.
 ```sh
 git clone https://github.com/wilbresley/spartan-live.git
 cd spartan-live
-chmod +x preparar.sh subir.sh instalar.sh
+chmod +x *.sh
 ./instalar.sh
 ```
 
