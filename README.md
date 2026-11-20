@@ -48,12 +48,27 @@ Na instalação nova o admin da página é `spartan`, com senha sorteada na prim
 
 O endereço local sai no final: `http://IP-DESTA-MAQUINA:8097`.
 
-Atualizar a página sem apagar o login:
+Atualizar a página sem apagar o login (a pasta precisa ter sido clonada, com `.git`):
 
 ```sh
 git pull
 docker compose up -d --build spartan-live-site
 ```
+
+Se a pasta do servidor foi copiada do PC em vez de clonada, não existe `.git` e o `git pull` responde `not a git repository`. Uma vez só, transforma a pasta em clone mantendo o que é local:
+
+```sh
+cd /home/bresley/docker/spartan-live
+git init -b main
+git remote add origin https://github.com/wilbresley/spartan-live.git
+git fetch origin
+git reset --hard origin/main
+git branch --set-upstream-to=origin/main
+```
+
+`git reset --hard` reescreve só os arquivos do repositório. O `.env`, o `motor/mediamtx.yml`, o `publisher/publish.json`, o `download/` e o volume `spartan-viewer` estão no `.gitignore` e ficam como estão — o login e as contas não se perdem. Depois disso, `git pull` funciona normalmente.
+
+Trocou arquivos por `scp` (sem git)? Para não misturar os dois jeitos, faça `git fetch origin && git reset --hard origin/main` antes do rebuild, e o próximo deploy volta a ser `git pull`.
 
 Zerar o login apaga o volume e gera senhas novas:
 
