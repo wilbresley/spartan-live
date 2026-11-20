@@ -259,6 +259,19 @@ body:not(.view-mobile) #settings {
   flex: 0 0 auto;
 }
 
+/* Nome de quem está logado, à esquerda da engrenagem: conta ou crachá do convidado. */
+.whoami {
+  max-width: 24ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.whoami.hidden { display: none; }
+
 body:not(.view-mobile) #guest-tools,
 body:not(.view-mobile) #theater-toggle,
 body:not(.view-mobile) #grid-fullscreen,

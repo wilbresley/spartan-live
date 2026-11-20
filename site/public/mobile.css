@@ -29,6 +29,21 @@ body.view-mobile .m-bar {
   border-bottom: 1px solid #2a2a2a;
 }
 
+/* Nome de quem está logado, à esquerda da engrenagem do celular. */
+body.view-mobile .m-who {
+  max-width: 40vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #c9c9c9;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+  text-align: right;
+}
+
+body.view-mobile .m-who.hidden { display: none; }
+
 body.view-mobile #m-burger,
 body.view-mobile #m-gear,
 body.view-mobile #m-drawer-close,

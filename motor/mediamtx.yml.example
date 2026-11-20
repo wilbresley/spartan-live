@@ -26,28 +26,6 @@ hlsSegmentCount: 120
 authMethod: http
 authHTTPAddress: http://spartan-live-site:8080/api/mtx-auth?secret=TROQUE_SEGREDO_MOTOR
 
-# Motor antigo (um único usuário publisher, para o .exe velho): troque as duas
-# linhas acima por estas e descomente o bloco todo.
-# authMethod: internal
-# authInternalUsers:
-#   - user: any
-#     pass:
-#     ips: []
-#     permissions: []
-#
-#   - user: publisher
-#     pass: TROQUE_SENHA_PUBLISHER
-#     ips: []
-#     permissions:
-#       - action: publish
-#
-#   - user: site
-#     pass: TROQUE_SENHA_SITE
-#     ips: []
-#     permissions:
-#       - action: read
-#       - action: api
-
 pathDefaults:
   overridePublisher: true
 

@@ -49,10 +49,7 @@ const MTX_API_URL = (process.env.MTX_API_URL || "http://spartan-live-motor:9997"
 const MTX_HLS_URL = (process.env.MTX_HLS_URL || "http://spartan-live-motor:8888").replace(/\/$/, "");
 const MTX_USER = process.env.MTX_USER || "";
 const MTX_PASSWORD = process.env.MTX_PASSWORD || "";
-const PUBLISH_USER = process.env.PUBLISH_USER || "";
-const PUBLISH_PASSWORD = process.env.PUBLISH_PASSWORD || "";
-// Segredo que o motor manda no authHTTPAddress. Sem ele, /api/mtx-auth responde 503
-// (o caminho antigo, com credencial única dentro do mediamtx.yml, continua valendo).
+// Segredo que o motor manda no authHTTPAddress. Sem ele, /api/mtx-auth responde 503.
 const MTX_AUTH_SECRET = process.env.MTX_AUTH_SECRET || "";
 
 const COOKIE = "spartan_live";
@@ -347,17 +344,9 @@ export function publishTargetOk(user, path) {
   return Boolean(account) && target === account;
 }
 
-function legacyPublisher(user, password) {
-  // Credencial antiga embutida no programa (PUBLISH_USER/PUBLISH_PASSWORD). Fica valendo
-  // só durante a troca dos programas; sai do .env quando todos estiverem no novo.
-  return Boolean(PUBLISH_USER) && Boolean(PUBLISH_PASSWORD)
-    && passwordsMatch(user, PUBLISH_USER) && passwordsMatch(password, PUBLISH_PASSWORD);
-}
-
 function publisherAllowed(body, name = "") {
   const user = String(body.user || "");
   const password = String(body.password || "");
-  if (legacyPublisher(user, password)) return true;
   if (!publishTargetOk(user, name)) return false;
   try {
     return userCanPublish(readUsersStore(), normalizeUserName(user), password);
@@ -380,6 +369,7 @@ const STATIC = {
   "/nick-tag.mjs": { file: "nick-tag.mjs", type: "text/javascript; charset=utf-8", cache: "no-cache" },
   "/view-mode.mjs": { file: "view-mode.mjs", type: "text/javascript; charset=utf-8", cache: "no-cache" },
   "/users-ui.mjs": { file: "users-ui.mjs", type: "text/javascript; charset=utf-8", cache: "no-cache" },
+  "/identity-label.mjs": { file: "identity-label.mjs", type: "text/javascript; charset=utf-8", cache: "no-cache" },
   "/style.css": { file: "style.css", type: "text/css; charset=utf-8", cache: "no-cache" },
   "/mobile.css": { file: "mobile.css", type: "text/css; charset=utf-8", cache: "no-cache" },
   "/entrar.mp3": { file: "entrar.mp3", type: "audio/mpeg", cache: "public, max-age=86400" },
@@ -996,10 +986,6 @@ async function handleThumb(req, res) {
 async function handleStop(req, res) {
   const body = await readJson(req);
   const name = String(body.name || "");
-  if (!PUBLISH_USER || !PUBLISH_PASSWORD) {
-    sendJson(res, 503, { error: "parada manual indisponivel" });
-    return;
-  }
   if (!publisherAllowed(body, name) || !safeStreamName(name)) {
     sendJson(res, 401, { error: "nao autorizado" });
     return;
@@ -1285,15 +1271,11 @@ async function handleMtxAuth(req, res, url) {
     // Mesma conta e mesma senha do site. Conta sem senha (link não usado) não publica.
     // O caminho publicado tem que ser o nome da conta (Opção 1): o motor manda o path
     // no corpo do pedido, então dá para conferir aqui antes de liberar o ffmpeg.
-    if (legacyPublisher(user, password)) {
-      allowed = true;
-    } else {
-      try {
-        allowed = publishTargetOk(user, body.path)
-          && userCanPublish(readUsersStore(), normalizeUserName(user), password);
-      } catch {
-        allowed = false;
-      }
+    try {
+      allowed = publishTargetOk(user, body.path)
+        && userCanPublish(readUsersStore(), normalizeUserName(user), password);
+    } catch {
+      allowed = false;
     }
   } else if (action === "read" || action === "api" || action === "metrics" || action === "pprof" || action === "playback") {
     // Leitura e API só pela conta de serviço do site, dentro da rede do compose.

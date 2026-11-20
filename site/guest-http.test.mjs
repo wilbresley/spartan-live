@@ -6,16 +6,24 @@ import path from "node:path";
 import test from "node:test";
 
 import { savePassword } from "./password.mjs";
+import { createUser, loadUsers, redeemFirstAccess, saveUsers } from "./users.mjs";
 
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "spartan-guest-"));
 process.env.VIEWER_USER = "spartan";
 process.env.SESSION_SECRET = "teste-sessao";
 process.env.MTX_USER = "site";
 process.env.MTX_PASSWORD = "leitura";
-process.env.PUBLISH_USER = "pub";
-process.env.PUBLISH_PASSWORD = "pub-segredo";
 process.env.DATA_DIR = dataDir;
 savePassword(path.join(dataDir, "password.json"), "spartan", "senha-de-teste");
+// Quem transmite entra com a conta e a senha dela: não existe mais credencial única.
+const usersFile = path.join(dataDir, "users.json");
+const usersStore = loadUsers(usersFile, {
+  adminUser: "spartan",
+  legacyFile: path.join(dataDir, "password.json"),
+}).store;
+const anaAccount = createUser(usersStore, "ana");
+redeemFirstAccess(usersStore, anaAccount.token, "senha-da-ana");
+saveUsers(usersFile, usersStore);
 
 const { onRequest, signSession, guestMaySee, rememberShare, accessIdOf } = await import("./server.mjs");
 
@@ -117,7 +125,7 @@ test("um convite por vez, o convidado assiste e o link morto fica cinza", async 
     await ask(server, {
       method: "POST",
       path: "/api/share",
-      body: JSON.stringify({ name: "ana", user: "pub", password: "pub-segredo", guestsTemp: true, guestsPerm: false }),
+      body: JSON.stringify({ name: "ana", user: "ana", password: "senha-da-ana", guestsTemp: true, guestsPerm: false }),
     });
 
     const nameless = await ask(server, {
@@ -144,7 +152,7 @@ test("um convite por vez, o convidado assiste e o link morto fica cinza", async 
     const counted = await ask(server, {
       method: "POST",
       path: "/api/viewers",
-      body: JSON.stringify({ name: "ana", user: "pub", password: "pub-segredo" }),
+      body: JSON.stringify({ name: "ana", user: "ana", password: "senha-da-ana" }),
     });
     assert.equal(counted.json.viewers, 1);
     assert.equal(counted.json.guests, 1);
@@ -171,13 +179,13 @@ test("um convite por vez, o convidado assiste e o link morto fica cinza", async 
     const afterPeople = await ask(server, {
       method: "POST",
       path: "/api/viewers",
-      body: JSON.stringify({ name: "ana", user: "pub", password: "pub-segredo" }),
+      body: JSON.stringify({ name: "ana", user: "ana", password: "senha-da-ana" }),
     });
     assert.deepEqual(afterPeople.json.people.map((row) => row.nick), ["Adi"]);
     const afterLeave = await ask(server, {
       method: "POST",
       path: "/api/viewers",
-      body: JSON.stringify({ name: "ana", user: "pub", password: "pub-segredo" }),
+      body: JSON.stringify({ name: "ana", user: "ana", password: "senha-da-ana" }),
     });
     assert.equal(afterLeave.json.viewers, 0);
     assert.equal(afterLeave.json.guests, 1);
@@ -250,7 +258,7 @@ test("um convite por vez, o convidado assiste e o link morto fica cinza", async 
     const shareOnlyPerm = await ask(server, {
       method: "POST",
       path: "/api/share",
-      body: JSON.stringify({ name: "ana", user: "pub", password: "pub-segredo", guestsTemp: false, guestsPerm: true }),
+      body: JSON.stringify({ name: "ana", user: "ana", password: "senha-da-ana", guestsTemp: false, guestsPerm: true }),
     });
     assert.equal(shareOnlyPerm.status, 200);
     assert.equal(shareOnlyPerm.json.guestsTemp, false);
@@ -260,14 +268,14 @@ test("um convite por vez, o convidado assiste e o link morto fica cinza", async 
     await ask(server, {
       method: "POST",
       path: "/api/share",
-      body: JSON.stringify({ name: "ana", user: "pub", password: "pub-segredo", guestsTemp: true, guestsPerm: false }),
+      body: JSON.stringify({ name: "ana", user: "ana", password: "senha-da-ana", guestsTemp: true, guestsPerm: false }),
     });
     assert.equal(guestMaySee(permSession, "ana"), false);
     assert.equal(guestMaySee(tempSession, "ana"), true);
     await ask(server, {
       method: "POST",
       path: "/api/share",
-      body: JSON.stringify({ name: "ana", user: "pub", password: "pub-segredo", guestsTemp: false, guestsPerm: false }),
+      body: JSON.stringify({ name: "ana", user: "ana", password: "senha-da-ana", guestsTemp: false, guestsPerm: false }),
     });
     assert.equal(guestMaySee(permSession, "ana"), false);
     assert.equal(guestMaySee(tempSession, "ana"), false);
@@ -275,7 +283,7 @@ test("um convite por vez, o convidado assiste e o link morto fica cinza", async 
     const shareAlias = await ask(server, {
       method: "POST",
       path: "/api/share",
-      body: JSON.stringify({ name: "ana", user: "pub", password: "pub-segredo", guests: false, permanent: true }),
+      body: JSON.stringify({ name: "ana", user: "ana", password: "senha-da-ana", guests: false, permanent: true }),
     });
     assert.equal(shareAlias.json.guestsTemp, false);
     assert.equal(shareAlias.json.guestsPerm, true);

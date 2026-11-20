@@ -58,6 +58,7 @@ import {
   sortUsers,
   userState,
 } from "./users-ui.mjs";
+import { identityLabel } from "./identity-label.mjs";
 
 const loginView = document.querySelector("#login-view");
 const passwordView = document.querySelector("#password-view");
@@ -68,6 +69,8 @@ const passwordForm = document.querySelector("#password-form");
 const passwordError = document.querySelector("#password-error");
 const settingsButton = document.querySelector("#settings");
 const settingsPop = document.querySelector("#settings-pop");
+const whoamiLabel = document.querySelector("#whoami");
+const mWhoLabel = document.querySelector("#m-who");
 const headerActions = document.querySelector(".header-actions");
 const headerOverflow = document.querySelector("#header-overflow");
 const guestTools = document.querySelector("#guest-tools");
@@ -845,6 +848,7 @@ async function flushChime(now) {
 }
 let viewerRole = "owner";
 let viewerIsAdmin = false;
+let viewerUser = "";
 let viewerGuestKind = "";
 let guestTempInvite = null;
 let guestPermInvite = null;
@@ -867,8 +871,24 @@ function storedNick() {
   try { return cleanNick(localStorage.getItem(NICK_KEY) || ""); } catch { return ""; }
 }
 
-function rememberNick(value) {
-  try { localStorage.setItem(NICK_KEY, value); } catch { /* sem armazenamento */ }
+// Quem tem conta não escolhe apelido: o login já é o nome. O apelido guardado
+// também registra de onde veio, para o convidado que abre um link num navegador
+// que já teve conta ser perguntado de novo (e não herdar o nome do dono).
+const NICK_SOURCE_KEY = "spartan-live-nick-source";
+
+function storedNickSource() {
+  try { return localStorage.getItem(NICK_SOURCE_KEY) || ""; } catch { return ""; }
+}
+
+function rememberNick(value, source = "guest") {
+  try {
+    localStorage.setItem(NICK_KEY, value);
+    localStorage.setItem(NICK_SOURCE_KEY, source);
+  } catch { /* sem armazenamento */ }
+}
+
+function guestNickReady() {
+  return Boolean(storedNick()) && storedNickSource() === "guest";
 }
 
 function watchPayload(names) {
@@ -913,7 +933,7 @@ function showNickGate() {
   appView.classList.add("hidden");
   viewAsk?.classList.add("hidden");
   nickAsk.classList.remove("hidden");
-  if (nickInput) nickInput.value = "";
+  if (nickInput) nickInput.value = storedNick();
   if (nickError) nickError.textContent = "";
   nickInput?.focus();
 }
@@ -949,7 +969,15 @@ function finishEnterApp() {
 
 function enterApp() {
   hideGuestGone();
-  if (!storedNick()) {
+  if (viewerRole === "guest") {
+    // O convidado escolhe o apelido do crachá; a conta já entra com o nome dela.
+    if (!guestNickReady()) {
+      showNickGate();
+      return;
+    }
+  } else if (viewerUser) {
+    rememberNick(viewerUser, "account");
+  } else if (!storedNick()) {
     showNickGate();
     return;
   }
@@ -1065,8 +1093,39 @@ function paintAdminTools() {
   document.querySelector("#m-set-people")?.classList.toggle("hidden", !viewerIsAdmin);
 }
 
+// Nome no topo, à esquerda da engrenagem: a conta quando é conta, o crachá do
+// convite quando é convidado. Fica vazio no login.
+function paintWhoami() {
+  const text = identityLabel({
+    role: viewerRole === "guest" ? "guest" : viewerIsAdmin ? "admin" : viewerUser ? "user" : "",
+    user: viewerUser,
+    kind: viewerGuestKind,
+    accessId: viewerGuestKind === "permanent" ? 3 : 2,
+  }, storedNick());
+  for (const label of [whoamiLabel, mWhoLabel]) {
+    if (!label) continue;
+    label.textContent = text;
+    label.classList.toggle("hidden", !text);
+  }
+}
+
+// Guarda quem está logado assim que a sessão abre (login ou /api/me). Sem isso o
+// admin só via "Contas de acesso" depois de recarregar a página.
+function applyViewer(me) {
+  viewerUser = String(me?.user || "");
+  viewerRole = me?.role === "guest" ? "guest" : me?.role === "admin" ? "owner" : "user";
+  viewerIsAdmin = me?.role === ROLE_ADMIN;
+  if (Number(me?.accessId) === 3) viewerGuestKind = "permanent";
+  else if (Number(me?.accessId) === 2) viewerGuestKind = "temporary";
+  else viewerGuestKind = me?.kind || "";
+  document.body.dataset.guest = viewerRole === "guest" ? "1" : "";
+  paintAdminTools();
+  paintWhoami();
+}
+
 function paintGuest() {
   paintAdminTools();
+  paintWhoami();
   if (viewerRole === "guest" && viewerGuestKind !== "permanent" && guestTempInvite && guestTempInvite.exp <= Date.now()) {
     guestTempInvite = null;
     showGuestGone("expired");
@@ -1123,8 +1182,10 @@ function showLogin() {
   hideGuestGone();
   viewerRole = "owner";
   viewerIsAdmin = false;
+  viewerUser = "";
   viewerGuestKind = "";
   paintAdminTools();
+  paintWhoami();
   closeUsers();
   guestTempInvite = null;
   guestPermInvite = null;
@@ -1133,11 +1194,22 @@ function showLogin() {
   window.clearTimeout(guestHoldTimer);
   window.clearTimeout(guestWarnTimer);
   hideNickGate();
+  hideViewModeAsk();
   closeAudience();
+  // Sair não pode deixar Ajustes, avisos nem o app do celular abertos por cima do login.
+  settingsPop?.classList.add("hidden");
+  closeMobileSettings();
+  closeMobileDrawer();
+  document.querySelector("#guest-revoke-ask")?.classList.add("hidden");
+  document.querySelector("#download-ask")?.classList.add("hidden");
+  document.querySelector("#password-ask")?.classList.add("hidden");
+  unmountMobile();
   document.body.dataset.guest = "";
   appView.classList.add("hidden");
   passwordView.classList.add("hidden");
   loginView.classList.remove("hidden");
+  const passwordField = loginForm?.querySelector('input[name="password"]');
+  if (passwordField) passwordField.value = "";
   paintGuest();
 }
 
@@ -2459,8 +2531,13 @@ loginForm.addEventListener("submit", async (event) => {
         password: form.get("password"),
       }),
     });
-    if (data.mustChange) showPasswordGate();
-    else await enterApp();
+    if (data.mustChange) {
+      applyViewer({ user: data.user, role: data.role });
+      showPasswordGate();
+    } else {
+      applyViewer({ user: data.user, role: data.role });
+      await enterApp();
+    }
   } catch (error) {
     loginError.textContent = error.message;
   }
@@ -2726,7 +2803,11 @@ document.querySelector("#download").addEventListener("click", async () => {
 });
 
 logoutButton.addEventListener("click", async () => {
-  await api("/api/logout", { method: "POST", body: "{}" });
+  try {
+    await api("/api/logout", { method: "POST", body: "{}" });
+  } catch {
+    /* sem rede: sai do mesmo jeito, o cookie vence sozinho */
+  }
   showLogin();
 });
 
@@ -3109,17 +3190,11 @@ window.addEventListener("pagehide", () => {
 
 api("/api/me")
   .then((me) => {
+    applyViewer(me);
     if (me.mustChange) {
       showPasswordGate();
       return;
     }
-    viewerRole = me.role === "guest" ? "guest" : me.role === "admin" ? "owner" : "user";
-    viewerIsAdmin = me.role === ROLE_ADMIN;
-    paintAdminTools();
-    if (Number(me.accessId) === 3) viewerGuestKind = "permanent";
-    else if (Number(me.accessId) === 2) viewerGuestKind = "temporary";
-    else viewerGuestKind = me.kind || "";
-    document.body.dataset.guest = viewerRole === "guest" ? "1" : "";
     if (viewerRole === "guest" && Number(me.exp) > Date.now()) {
       if (viewerGuestKind === "permanent") guestPermInvite = { exp: me.exp };
       else guestTempInvite = { exp: me.exp };
