@@ -22,12 +22,15 @@ from spartan_live import (
     WindowVideoFeeder,
     _QtVar,
     _WGCWindowGrabber,
+    account_credentials,
+    credentials_denied,
     reap_retired,
     audience_counts,
     audience_kind_mark,
     audience_people,
     audience_status,
     build_replay_save_command,
+    clean_nick,
     clean_display_nick,
     clean_restream_url,
     filter_audience,
@@ -100,7 +103,10 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(audience_status(0, 3, 0), ["👁 0 assistindo", "⏳ 3 pelo link", "∞ 0 permanente"])
         self.assertEqual(audience_status(1, 4, 2), ["👁 1 assistindo", "⏳ 4 pelo link", "∞ 2 permanente"])
         self.assertEqual(audience_status(0, 0, 0), [])
-        self.assertEqual(clean_display_nick("  João  "), "João")
+        self.assertEqual(clean_display_nick("  Jose  "), "Jose")
+        self.assertEqual(clean_display_nick("Jose Silva"), "Jose Silva")
+        self.assertEqual(clean_display_nick("  João  "), "")
+        self.assertEqual(clean_display_nick("Jose\u0301"), "")
         self.assertEqual(clean_display_nick("A"), "")
         self.assertEqual(clean_display_nick("ok<script>"), "")
         self.assertEqual(audience_kind_mark("owner"), "👁")
@@ -167,6 +173,36 @@ class PublisherTests(unittest.TestCase):
         self.assertTrue(valid_nick("ana"))
         self.assertFalse(valid_nick("a"))
         self.assertFalse(valid_nick("com espaco"))
+        self.assertFalse(valid_nick("josé"))
+        self.assertFalse(valid_nick("josé_2"))
+        self.assertFalse(valid_nick("ana!"))
+        self.assertFalse(valid_nick("x" * 25))
+        # A conta do site é minúscula: "Ana" e "ana" seriam duas contas diferentes.
+        self.assertFalse(valid_nick("Ana"))
+        self.assertEqual(clean_nick("  Ana  "), "ana")
+        self.assertEqual(clean_nick("José Silva"), "jossilva")
+        self.assertEqual(clean_nick("ana!"), "ana")
+        self.assertEqual(clean_nick("A" * 30), "a" * 24)
+
+    def test_conta_do_site_e_o_apelido(self):
+        # Opção 1: o caminho publicado é o usuário, e a senha vem do campo Senha.
+        self.assertEqual(account_credentials(" Ana ", "segredo"), ("ana", "segredo"))
+        self.assertEqual(account_credentials("ana", ""), ("", ""))
+        self.assertEqual(account_credentials("", "segredo"), ("", ""))
+        self.assertEqual(account_credentials("a", "segredo"), ("", ""))
+        self.assertEqual(account_credentials("josé", "segredo"), ("", ""))
+        self.assertTrue(credentials_denied("auth"))
+        self.assertFalse(credentials_denied("net"))
+        self.assertFalse(credentials_denied(""))
+
+    def test_url_de_publicacao_leva_a_conta_no_caminho(self):
+        account = account_credentials("Ana", "senha da ana")
+        publish = {"host": "live.exemplo.net", "port": 1935}
+        publish["user"], publish["password"] = account
+        self.assertEqual(
+            rtmp_url(publish, account[0]),
+            "rtmp://live.exemplo.net:1935/ana?user=ana&pass=senha%20da%20ana",
+        )
 
     def test_aviso_pelo_dominio_usa_o_site_e_o_ip_usa_a_porta_local(self):
         self.assertTrue(looks_like_ip("192.168.1.10"))
@@ -772,13 +808,19 @@ class PublisherTests(unittest.TestCase):
         finally:
             live.detach()
             for proc in (mux_proc, video_proc):
-                if proc is None or proc.poll() is not None:
+                if proc is None:
                     continue
-                proc.kill()
-                try:
-                    proc.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    pass
+                if proc.poll() is None:
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        pass
+                # Fecha os pipes na mão: deixar para o coletor de lixo gera
+                # ResourceWarning no fim do teste.
+                for stream in (proc.stdout, proc.stderr):
+                    if stream is not None:
+                        stream.close()
         self.assertEqual(mux_proc.returncode, 0, err[-800:])
         self.assertNotIn("Invalid argument", err)
         self.assertNotIn("Invalid audio channels", err)
@@ -890,9 +932,9 @@ class PublisherTests(unittest.TestCase):
 
             app.running = True
             app.stopping = False
-            app.live_nick = "Bresley"
+            app.live_nick = "bresley"
             app.live_host = "192.168.100.16"
-            app.publish = {"user": "pub", "password": "segredo"}
+            app._live_account = ("bresley", "segredo")
             with mock.patch("spartan_live.post_share", side_effect=capture):
                 app.share_perm_check.setChecked(True)
                 app.update_idletasks()
@@ -1178,7 +1220,12 @@ class PublisherTests(unittest.TestCase):
                         proc = subprocess.Popen(
                             vcmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                         )
-                        _out, err = proc.communicate(timeout=10)
+                        try:
+                            _out, err = proc.communicate(timeout=10)
+                        finally:
+                            for stream in (proc.stdout, proc.stderr):
+                                if stream is not None:
+                                    stream.close()
                         self.assertEqual(proc.returncode, 0, err[-600:])
                     finally:
                         feeder.close()

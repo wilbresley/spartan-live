@@ -18,10 +18,12 @@ fi
 ./preparar.sh
 docker compose up -d --build
 
+admin_user="$(sed -n 's/^VIEWER_USER=//p' .env | head -n1)"
+[ -n "$admin_user" ] || admin_user=spartan
+
 echo
 echo "Spartan Live está no ar."
 echo "Abre no navegador: http://IP-DESTE-SERVIDOR:8097"
-echo "Login: spartan"
-echo "Senha: spartanadmin"
-echo "Na primeira entrada o site pede uma senha nova."
-echo "Se essa senha for esquecida, apaga os dados e reinstala: docker compose down -v && ./instalar.sh"
+echo "Admin da página: ${admin_user} (a senha inicial aparece no log do site, uma vez)"
+echo "  docker compose logs spartan-live-site | grep 'Senha inicial'"
+echo "Esqueceu a senha? ./admin-reset.sh link ${admin_user}"

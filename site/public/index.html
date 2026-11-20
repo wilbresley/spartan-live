@@ -183,6 +183,10 @@
           <button id="m-set-names" class="m-row" type="button"><span>Nomes no vídeo</span><em id="m-set-names-val">Visíveis</em></button>
           <button id="m-set-mode" class="m-row" type="button"><span>Ver como no computador</span><em>Modo PC</em></button>
         </section>
+        <section class="m-set-group hidden" id="m-set-people">
+          <h2>Pessoas</h2>
+          <button id="m-set-users" class="m-row" type="button"><span>Contas de acesso</span><em>Abrir</em></button>
+        </section>
         <section class="m-set-group" id="m-set-account">
           <h2>Conta</h2>
           <button id="m-set-password-open" class="m-row" type="button"><span>Trocar senha</span><em>Abrir</em></button>
@@ -255,6 +259,28 @@
       <div class="password-actions">
         <button id="download-ask-no" type="button">Não</button>
         <button id="download-ask-yes" type="button">Sim</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="users-pop" class="hidden" role="dialog" aria-modal="true" aria-labelledby="users-title">
+    <div class="users-card">
+      <h2 id="users-title">Contas de acesso</h2>
+      <p class="muted">Cada pessoa entra com a própria conta. Quem ainda não abriu o convite não consegue entrar nem transmitir.</p>
+      <ul id="users-list" class="users-list"></ul>
+      <p id="users-empty" class="users-empty hidden">Nenhuma conta ainda.</p>
+      <form id="users-create" class="users-create">
+        <input id="users-name" name="user" maxlength="24" placeholder="Nome da conta" autocomplete="off" spellcheck="false" required>
+        <button type="submit">Criar</button>
+      </form>
+      <div id="users-link" class="users-link hidden">
+        <span id="users-link-for" class="users-link-for"></span>
+        <input id="users-link-url" class="users-link-url" readonly>
+        <button id="users-link-copy" type="button">Copiar</button>
+      </div>
+      <p id="users-message" class="users-message hidden" role="status"></p>
+      <div class="users-actions">
+        <button id="users-close" type="button">Fechar</button>
       </div>
     </div>
   </div>

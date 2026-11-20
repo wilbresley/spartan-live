@@ -1,7 +1,7 @@
 FROM node:26-alpine
 
 WORKDIR /app
-COPY server.mjs password.mjs ./
+COPY server.mjs password.mjs users.mjs admin-cli.mjs ./
 COPY public ./public
 RUN mkdir -p /app/data && chown -R node:node /app/data
 

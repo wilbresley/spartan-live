@@ -29,13 +29,22 @@ export function verifyPassword(plain, record) {
   return crypto.timingSafeEqual(actual, expected);
 }
 
-export function loadPassword(file, user = "spartan") {
-  if (fs.existsSync(file)) {
-    const record = JSON.parse(fs.readFileSync(file, "utf8"));
-    record.user = record.user || user;
-    return record;
-  }
-  const record = { user, ...hashPassword("spartanadmin"), mustChange: true };
+// Impressão digital do registro (muda a cada troca de senha, mesmo com o mesmo
+// texto). O cookie de sessão carrega essa marca, então senha trocada derruba
+// todos os cookies emitidos antes.
+export function passwordStamp(record) {
+  if (!record?.salt || !record?.hash) return "";
+  return crypto.createHash("sha256").update(`${record.salt}:${record.hash}`).digest("base64url").slice(0, 16);
+}
+
+function looksLikeHash(record) {
+  if (!record || typeof record !== "object") return false;
+  if (typeof record.salt !== "string" || typeof record.hash !== "string") return false;
+  return Buffer.from(record.salt, "base64url").length >= 8
+    && Buffer.from(record.hash, "base64url").length >= 16;
+}
+
+function writeRecord(file, record) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify(record), { mode: 0o600 });
   try {
@@ -44,6 +53,43 @@ export function loadPassword(file, user = "spartan") {
     /* o volume do Windows não aceita esse modo */
   }
   return record;
+}
+
+// Guarda o arquivo ruim de lado antes de recriar: se ele quebrou por corrupção do
+// disco, o original fica para investigar.
+function quarantine(file) {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const backup = `${file}.corrupt-${stamp}`;
+  try {
+    fs.renameSync(file, backup);
+    return backup;
+  } catch {
+    return "";
+  }
+}
+
+export function loadPassword(file, user = "spartan") {
+  if (fs.existsSync(file)) {
+    let record = null;
+    try {
+      record = JSON.parse(fs.readFileSync(file, "utf8"));
+    } catch {
+      record = null;
+    }
+    // Arquivo quebrado (JSON inválido, truncado, sem hash) travava o site inteiro:
+    // loadPassword estourava e todo pedido virava 500. Agora ele é posto de lado e
+    // nasce um novo com a senha padrão e a troca obrigatória.
+    if (!looksLikeHash(record)) {
+      const backup = quarantine(file);
+      console.warn(
+        `password.json invalido${backup ? ` (guardado em ${path.basename(backup)})` : ""}; recriando a senha padrao.`,
+      );
+      return writeRecord(file, { user, ...hashPassword("spartanadmin"), mustChange: true });
+    }
+    record.user = record.user || user;
+    return record;
+  }
+  return writeRecord(file, { user, ...hashPassword("spartanadmin"), mustChange: true });
 }
 
 export function savePassword(file, user, plain) {

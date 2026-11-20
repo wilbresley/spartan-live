@@ -2,11 +2,15 @@ export const NICK_MIN = 2;
 export const NICK_MAX = 24;
 export const NICK_KEY = "spartan-live-display-nick";
 
+// Só ASCII, igual ao programa: "josé" é recusado (escreva "jose"). O acento quebrava
+// o nome do caminho da live e o crachá aparecia cortado.
+const NICK_CHAR = /^[A-Za-z0-9 _-]$/;
+
 export function cleanNick(value) {
   const text = String(value || "").replace(/\s+/g, " ").trim();
   if (text.length < NICK_MIN || text.length > NICK_MAX) return "";
   for (const ch of text) {
-    if (!/[\p{L}\p{N} _-]/u.test(ch)) return "";
+    if (!NICK_CHAR.test(ch)) return "";
   }
   return text;
 }

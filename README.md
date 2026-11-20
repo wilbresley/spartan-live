@@ -38,9 +38,9 @@ chmod +x preparar.sh subir.sh instalar.sh
 ./instalar.sh
 ```
 
-`instalar.sh` confere o Docker, executa `preparar.sh` e sobe os containers. `preparar.sh` cria, se ainda não existirem, `.env`, `motor/mediamtx.yml` e `publisher/publish.json`, com senhas novas. A senha de transmitir é impressa uma vez. Esses três arquivos ficam fora do git.
+`instalar.sh` confere o Docker, executa `preparar.sh` e sobe os containers. `preparar.sh` cria, se ainda não existirem, `.env`, `motor/mediamtx.yml` e `publisher/publish.json`, com senhas novas: a do motor, a de leitura do site e o segredo que o motor manda para o site (`authMethod: http`). Esses três arquivos ficam fora do git.
 
-Na instalação nova o login da página é `spartan` / `spartanadmin`. O site exige a troca antes de assistir. A senha nova fica no volume `spartan-viewer`.
+Na instalação nova o admin da página é `spartan`, com senha sorteada na primeira subida e mostrada uma vez (`docker compose logs spartan-live-site | grep 'Senha inicial'`). O site exige a troca antes de assistir. As contas ficam em `users.json`, no volume `spartan-viewer`.
 
 ```sh
 ./subir.sh
@@ -76,7 +76,7 @@ cd publisher
 .\build.ps1
 ```
 
-`build.ps1` instala o empacotador e o PySide6, gera `publisher\dist\SpartanLive.exe` e grava o ícone do projeto. O `publish.json` entra no executável com o usuário e a senha de transmitir. O campo de servidor sai vazio.
+`build.ps1` instala o empacotador e o PySide6, gera `publisher\dist\SpartanLive.exe` e grava o ícone do projeto. O `publish.json` entra no executável só com host e porta: o apelido e a senha são da conta de quem transmite. O campo de servidor sai vazio.
 
 `make_icon.py` regrava `assets\Spartan-Live.ico`. O build usa o ícone que já está no repositório.
 
@@ -91,7 +91,7 @@ O site entrega só esse arquivo, e só com sessão. No modo celular, antes de ba
 
 ### Uso
 
-O programa pede apelido, servidor, tela ou janela/jogo, som do PC, microfone e a qualidade. O padrão é 1080p 60. A janela é Qt 6 (PySide6), sem a barra do Windows, e abre em 580×840 no centro do monitor principal. Arrastar a faixa de cima move a janela. As bordas e os cantos redimensionam pelo próprio Windows. O botão maximizar guarda o tamanho anterior.
+O programa pede apelido, senha da conta, servidor, tela ou janela/jogo, som do PC, microfone e a qualidade. Com a Página marcada, antes de abrir o vídeo ele confere a conta no site: se a senha não conferir, a live nem começa e aparece o aviso de que a conta ou a senha não conferem. O padrão é 1080p 60. A janela é Qt 6 (PySide6), sem a barra do Windows, e abre em 580×840 no centro do monitor principal. Arrastar a faixa de cima move a janela. As bordas e os cantos redimensionam pelo próprio Windows. O botão maximizar guarda o tamanho anterior.
 
 O seletor **Tela** abre um painel visual com **miniaturas ao vivo** separadas em duas seções — **Telas** (`Tela 1 — ...`) e **Janelas e Programas** (`Janela: Título (jogo.exe)`) — com campo de busca no topo para filtrar pelo nome ou executável e botão **↻ Atualizar**. Na captura de janela/jogo, o programa usa *Windows Graphics Capture* e tenta `IsBorderRequired = False` para esconder a borda amarela. Se o sistema não esconder a borda, o WGC segue mesmo assim — em jogo DirectX o PrintWindow costuma travar, então a borda amarela é o menor mal. Só cai no `PrintWindow` (`PW_RENDERFULLCONTENT`, com ponteiro real) quando o WGC não abre de jeito nenhum, ou quando abre e fica cerca de 1 s sem quadro. Em PC com placa dedicada e iGPU, o WGC abre o Direct3D na dedicada (mais VRAM). A abertura de janela espera até 10 s pelo primeiro horário do ffmpeg; tela inteira continua em 4 s. Ao trocar de tela, de janela ou de qualidade, a sessão anterior é fechada (`IClosable.Close`) antes de soltar o Direct3D. Sem esse fechamento, cada troca deixava as threads e a memória da sessão antiga dentro do Spartan Live. A troca não espera essa limpeza: o ffmpeg anterior é encerrado e a captura nova começa em seguida. O processo de ffmpeg que já morreu é descartado à parte, sem fechar o cano da imagem nem o do som que estão no ar.
 
@@ -101,19 +101,19 @@ Abaixo de 580×840 aparecem barras de rolagem independentes, vertical, horizonta
 
 Com a live aberta, a faixa de status mostra os dois contadores, mesmo quando um deles é zero. O olho é quem está logado na conta da página. A ampulheta é quem entrou pelo link temporário.
 
-O apelido tem 2 a 24 caracteres: letras, números, `_` e `-`. Ele é o nome da live.
+O apelido tem 2 a 24 caracteres: letras minúsculas, números, `_` e `-`, sem acento. Ele é o nome da live **e** o nome da conta no site: o motor só aceita publicar no caminho que é igual à conta, então ninguém entra na live de outra pessoa com a senha ou o apelido dela. O que foge disso é limpo no próprio campo: "José" vira `jos`, "Ana" vira `ana`.
 
 O campo Servidor aceita IPv4 ou domínio, sem `http://`. O programa remove esquema, caminho e porta escritos ali. O RTMP usa a porta do `publish.json`, 1935. Um IP avisa o site em `http://IP:8097`. Um domínio tenta `https://dominio` e, se falhar, `http://dominio:8097`.
 
 A caixa **Página** (ligada por padrão) fica no campo Servidor e manda a live para o site dos amigos. A caixa **Restreamer**, na linha de baixo, manda uma cópia se estiver marcada e com um endereço `rtmp://` ou `rtmps://` do [Restreamer](https://github.com/datarhei/restreamer) (Docker datarhei, não Restream.io), sem recodificar. As duas são independentes: as duas, só uma, ou nenhuma. A porta 1935 é do Spartan Live; o Restreamer precisa de outra (por exemplo 1936), senão os dois brigam no mesmo soquete. Esse destino extra não entra no `docker compose` daqui: sobe no Docker de quem usa, com a URL que o próprio Restreamer mostra.
 
-Apelido, servidor, caixa Página, caixa Restreamer, endereço Restreamer, qualidade, monitor e aparelhos ficam em `%APPDATA%\SpartanLive\config.json`. O log fica em `%APPDATA%\SpartanLive\spartan.log`, por 30 dias, sem senha. Em cada início ele anota a build do Windows, as placas DXGI com VRAM e qual seria escolhida para WGC, o modo real (`window` / `ddagrab` / `gdigrab`), o encoder, o alvo (tela ou `exe`/`hwnd`/`pid`), a GPU do WGC ou o motivo do PrintWindow, e nas falhas o tempo de espera, os frames vistos e o detalhe do ffmpeg. A pasta temporária do executável só descompacta o programa.
+Apelido, senha da conta, servidor, caixa Página, caixa Restreamer, endereço Restreamer, qualidade, monitor e aparelhos ficam em `%APPDATA%\SpartanLive\config.json`. A senha fica em texto puro ali, como antes ficava no `publish.json`. O log fica em `%APPDATA%\SpartanLive\spartan.log`, por 30 dias, sem senha. Em cada início ele anota a build do Windows, as placas DXGI com VRAM e qual seria escolhida para WGC, o modo real (`window` / `ddagrab` / `gdigrab`), o encoder, o alvo (tela ou `exe`/`hwnd`/`pid`), a GPU do WGC ou o motivo do PrintWindow, e nas falhas o tempo de espera, os frames vistos e o detalhe do ffmpeg. A pasta temporária do executável só descompacta o programa.
 
 O som do PC começa no alto-falante padrão, ou no programa salvo se ele ainda estiver aberto. Dá para trocar o dispositivo, o programa ou o microfone com a live aberta. Os dois em "Sem som" deixam a faixa de áudio em silêncio até a pessoa escolher uma fonte, sem parar a live.
 
 Trocar de monitor ou de janela/jogo durante a live reinicia só a captura de vídeo e redireciona o áudio só se o som estiver em "Som da janela / jogo selecionado". A página mostra "Trocando tela!" e segue na ponta. A imagem e o som são independentes: a lista de som abre em Dispositivos e, abaixo, Janelas e programas, com busca. Dá para transmitir a tela inteira e ouvir só um programa. Se o jogo ainda está aberto e a janela some na troca de tela cheia, a live mostra a arte de espera até a janela nova desse mesmo processo ficar estável. Se o programa fecha de verdade, essa janela sai da lista na hora, o campo pede outra tela, o Spartan Live vem para a frente e abre o seletor. A lista se atualiza sozinha enquanto o seletor está aberto. Abrir o programa de novo não volta sozinho para a live: é preciso clicar na janela nova, mesmo que o nome seja igual ao de antes. Minimizar a janela não pede outra tela nem mostra a arte, e a live não passa sozinha para o monitor inteiro. Enquanto a captura moderna da janela está aberta, um instante sem quadro novo repete o último quadro, sem pedir para a janela se redesenhar. Se a imagem fica preta e o programa não está como administrador, ele avisa e oferece abrir de novo elevado. A live sempre sai com faixa de áudio; sem dispositivo e sem microfone, essa faixa leva silêncio, e ligar o som depois não reinicia a transmissão.
 
-Minimizar vai para a bandeja. Parado, o ícone é `assets/Spartan-Live.ico`. Transmitindo, `assets/Spartan-Live-ON.ico`. "Abrir com o Windows, sem iniciar a live" só registra o executável. A live não começa sozinha. Abaixo disso ficam duas caixas, sempre desmarcadas ao abrir o programa: compartilhar com convidados temporários e com convidados permanentes. Cada caixa manda o próprio flag (`guestsTemp` / `guestsPerm`) e libera só o tipo correspondente — a do temporário não mexe no permanente, e vice-versa. Conta com senha (acesso 1) vê todas as lives. Convidado temporário (acesso 2) e permanente (acesso 3) só veem quem marcou a caixa do tipo dele. Se o container do site reiniciar com a live ainda no ar, marque ou desmarque as caixas de novo: o compartilhar fica só na memória do Node. O apelido da live aceita até 24 caracteres (letras, números, `_` e `-`), com esse aviso em letra miúda sob o campo. O botão Espectadores abre a lista de quem está nesta live, com apelido e selo, em A–Z, com filtro todos/olho/ampulheta/infinito e rolagem depois de 10 nomes. A caixa **Guardar 10 min** copia o mesmo mux já codificado para um buffer em `%APPDATA%\SpartanLive\replay`, sem recapturar a tela. Com Página ou Restreamer ligados, o botão continua **Transmitir** e o rolo é extra. Sem os dois, o botão vira **Guardar**: a captura é a mesma, mas não sai da máquina. **Salvar clipe** junta os pedaços já fechados e ignora o último, que ainda está sendo escrito — senão o começo do MP4 pode virar 2 ou 3 segundos da ponta atual.
+Minimizar vai para a bandeja. Parado, o ícone é `assets/Spartan-Live.ico`. Transmitindo, `assets/Spartan-Live-ON.ico`. "Abrir com o Windows, sem iniciar a live" só registra o executável. A live não começa sozinha. Abaixo disso ficam duas caixas, sempre desmarcadas ao abrir o programa: compartilhar com convidados temporários e com convidados permanentes. Cada caixa manda o próprio flag (`guestsTemp` / `guestsPerm`) e libera só o tipo correspondente — a do temporário não mexe no permanente, e vice-versa. Conta com senha (acesso 1) vê todas as lives. Convidado temporário (acesso 2) e permanente (acesso 3) só veem quem marcou a caixa do tipo dele. Se o container do site reiniciar com a live ainda no ar, marque ou desmarque as caixas de novo: o compartilhar fica só na memória do Node. O apelido aceita até 24 caracteres (letras minúsculas, números, `_` e `-`) e fica na mesma linha do campo **Senha**, a senha da conta no site, com o aviso em letra miúda sob cada um. O botão Espectadores abre a lista de quem está nesta live, com apelido e selo, em A–Z, com filtro todos/olho/ampulheta/infinito e rolagem depois de 10 nomes. A caixa **Guardar 10 min** copia o mesmo mux já codificado para um buffer em `%APPDATA%\SpartanLive\replay`, sem recapturar a tela. Com Página ou Restreamer ligados, o botão continua **Transmitir** e o rolo é extra. Sem os dois, o botão vira **Guardar**: a captura é a mesma, mas não sai da máquina. **Salvar clipe** junta os pedaços já fechados e ignora o último, que ainda está sendo escrito — senão o começo do MP4 pode virar 2 ou 3 segundos da ponta atual.
 
 ### Codificação
 
@@ -184,7 +184,7 @@ A reprodução começa muda. O volume vai de 0% a 200%, de 5 em 5 (acima de 100%
 
 Parar no programa, ou fechar a janela, avisa o servidor e o apelido sai na hora. Se a pessoa reabre a transmissão em até 1 minuto, quem já estava assistindo recebe o quadro de volta na grade com reprodução automática. Uma queda espera 90 segundos, com o quadro em "Offline. Aguardando a reconexão." Se a pessoa volta, o player reabre na ponta.
 
-Os sons de entrada e de saída tocam depois do login. A entrada marca uma live que começou. A saída marca uma parada, ou uma queda que passou de 90 segundos. Cada um espera 3 minutos antes de repetir o mesmo apelido. O botão em Ajustes liga e desliga os dois. Ajustes também troca a senha da página e baixa o programa `SpartanLive.exe`. No celular, o download só começa depois do Sim no aviso de que o arquivo é para Windows.
+Os sons de entrada e de saída tocam depois do login. A entrada marca uma live que começou. A saída marca uma parada, ou uma queda que passou de 90 segundos. Cada um espera 3 minutos antes de repetir o mesmo apelido. O botão em Ajustes liga e desliga os dois. Ajustes também troca a senha da própria conta e baixa o programa `SpartanLive.exe`. No celular, o download só começa depois do Sim no aviso de que o arquivo é para Windows.
 
 Antes da grade, cada navegador pede um apelido de 2 a 24 caracteres. Ele fica no `localStorage` daquele PC, não vem do nome da senha, e o ping de assistência manda esse apelido. Sem apelido a pessoa não entra na grade nem conta como espectador.
 
@@ -192,13 +192,25 @@ Quem entra pelo link temporário vê o tempo restante no topo; quem entra pelo p
 
 Quem entra por esse endereço assiste a grade, o volume e o teatro, e só vê as lives cujo dono marcou o tipo de convite no programa. Não vê o gerador, a lista de espectadores, o download do programa nem a troca de senha. Link vencido, revogado ou desconhecido abre uma tela cinza com os GIFs tristes. Quem já estava assistindo continua nessa tela, sem voltar ao login: o texto diz se o convite foi revogado ou se o tempo acabou. O cookie de sessão é um só por navegador (e as janelas anônimas do mesmo navegador compartilham esse cookie). Abrir o link temporário e o permanente na mesma sessão anônima faz o segundo atropelar o primeiro — para testar os dois ao mesmo tempo, use dois navegadores diferentes (por exemplo Chrome e Edge).
 
+## Contas
+
+Cada pessoa tem a própria conta em `users.json`, no volume `spartan-viewer`, com papel de admin ou de usuário. Na instalação nova, o admin é o `VIEWER_USER` (por padrão `spartan`), com senha sorteada e troca obrigatória no primeiro login. Qualquer conta com senha assiste a grade; **Pessoas → Contas de acesso** só abre para o admin.
+
+O admin cria a conta com o mesmo nome que a pessoa vai usar no programa: minúsculo, 2 a 24 caracteres, letras, números, `_` e `-`. A conta nasce **sem senha** e não entra no site nem publica até usar o link. O botão do link copia um endereço `/p/...`, que vale 7 dias e serve uma vez só: a página pede a senha nova (mínimo 8, diferente do nome da conta e fora da lista de senhas óbvias) e já entra logada.
+
+Na mesma lista o admin redefine a senha — o link novo derruba as sessões abertas daquela conta, e o programa dela só volta a publicar digitando a senha nova —, troca o papel entre admin e usuário e exclui a conta. O último admin não sai, e ninguém exclui a própria conta. Sem `users.json` válido, o servidor guarda o arquivo quebrado de lado e cria a lista de novo.
+
+Quem transmite digita no programa o apelido (a conta) e a senha da conta. O site só libera a publicação no caminho igual ao nome da conta, então ninguém publica no lugar de outra pessoa. Conta ainda sem senha não publica.
+
+Na atualização de um servidor antigo, o `password.json` vira a senha da primeira conta e continua valendo `PUBLISH_USER` / `PUBLISH_PASSWORD` do `.env` para o `.exe` velho, só durante a troca dos programas. Ordem do deploy: site, motor e depois o `.exe` novo com a conta de cada um.
+
 ## Segurança
 
-A senha da página é scrypt. O cookie de sessão é HttpOnly. Em HTTPS ele também é Secure. Oito senhas erradas no mesmo IP bloqueiam esse IP por 5 minutos.
+A senha de cada conta é scrypt, com sal próprio, em `users.json`. O cookie de sessão é HttpOnly e carrega o carimbo da senha: trocar ou redefinir a senha derruba as sessões antigas daquela conta. Em HTTPS ele também é Secure. Oito senhas erradas no mesmo IP bloqueiam esse IP por 5 minutos.
 
 `X-Forwarded-For` só é aceito quando o pedido chega de um proxy local. Acesso direto na 8097 não escolhe o próprio IP.
 
-O HLS e a lista exigem sessão. Publicar, parar, trocar de tela, enviar a miniatura e o compartilhamento com convidados exigem o usuário e a senha do `publish.json`, distintos do login da página. O nome da live só aceita o mesmo conjunto do apelido. O visitante do link usa o mesmo cookie, com o prazo do convite ou longo no permanente, e não troca a senha nem baixa o programa. Os convites ficam em `guest.json`, no volume `spartan-viewer`, com temporário e permanente separados. Em cada pedido o servidor confere o código do cookie contra esse arquivo (acesso 2 ou 3) e aplica a caixa correspondente do programa. A limpeza das miniaturas usa todas as lives ativas, não só as que o convidado pode ver, para um visitante sem permissão não apagar a foto dos outros.
+O HLS e a lista exigem sessão de uma conta com senha. Publicar, parar, trocar de tela, enviar a miniatura e o compartilhamento com convidados exigem a conta de quem transmite, e o caminho publicado tem que ser o nome dessa conta. Enquanto os programas antigos estiverem rodando, `PUBLISH_USER` / `PUBLISH_PASSWORD` do `.env` continuam valendo como credencial única, que publica em qualquer caminho — é a única brecha, e some quando a variável sai do `.env`. O nome da live só aceita o mesmo conjunto do apelido. O visitante do link usa o mesmo cookie, com o prazo do convite ou longo no permanente, e não troca a senha nem baixa o programa. Os convites ficam em `guest.json`, no volume `spartan-viewer`, com temporário e permanente separados. Em cada pedido o servidor confere o código do cookie contra esse arquivo (acesso 2 ou 3) e aplica a caixa correspondente do programa. A limpeza das miniaturas usa todas as lives ativas, não só as que o convidado pode ver, para um visitante sem permissão não apagar a foto dos outros.
 
 Ficam fora do git: `.env`, `motor/mediamtx.yml`, `publisher/publish.json`, `publisher/dist/`, `publisher/ffmpeg/`, `publisher/build/` e `download/`.
 
@@ -211,5 +223,7 @@ python -m unittest test_spartan_live.py
 
 ```sh
 cd site
-node --test auth.test.mjs buffer.test.mjs guest-http.test.mjs guest-link.test.mjs nick-tag.test.mjs password.test.mjs quick-return.test.mjs rail.test.mjs switch.test.mjs theater.test.mjs view-mode.test.mjs
+node --test
 ```
+
+Os testes do site sobem um servidor de verdade numa porta livre, com `users.json` e `guest.json` numa pasta temporária, e não tocam no volume do Docker.

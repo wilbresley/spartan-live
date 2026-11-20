@@ -5,15 +5,17 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { savePassword } from "./password.mjs";
+
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "spartan-guest-"));
 process.env.VIEWER_USER = "spartan";
-process.env.VIEWER_PASSWORD = "segredo-longo";
 process.env.SESSION_SECRET = "teste-sessao";
 process.env.MTX_USER = "site";
 process.env.MTX_PASSWORD = "leitura";
 process.env.PUBLISH_USER = "pub";
 process.env.PUBLISH_PASSWORD = "pub-segredo";
 process.env.DATA_DIR = dataDir;
+savePassword(path.join(dataDir, "password.json"), "spartan", "senha-de-teste");
 
 const { onRequest, signSession, guestMaySee, rememberShare, accessIdOf } = await import("./server.mjs");
 
@@ -284,3 +286,63 @@ test("um convite por vez, o convidado assiste e o link morto fica cinza", async 
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
 });
+
+test("arquivo estático responde a HEAD e cookie quebrado não derruba o site", async () => {
+  const server = await listen();
+  try {
+    const head = await ask(server, { method: "HEAD", path: "/app.js" });
+    assert.equal(head.status, 200);
+    assert.match(head.headers["content-type"], /javascript/);
+    assert.ok(Number(head.headers["content-length"]) > 1000);
+    assert.equal(head.raw, "");
+
+    // %E0%A4%A é um percent-encoding inválido: antes o decodeURIComponent estourava 500.
+    const broken = await ask(server, {
+      path: "/",
+      headers: { cookie: "spartan_live=%E0%A4%A; outro=1" },
+    });
+    assert.equal(broken.status, 200);
+    assert.match(broken.headers["content-type"], /text\/html/);
+
+    const noSession = await ask(server, {
+      path: "/api/streams",
+      headers: { cookie: "spartan_live=%%%" },
+    });
+    assert.equal(noSession.status, 401);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("estático manda ETag, responde 304 e comprime quando o cliente aceita", async () => {
+  const server = await listen();
+  try {
+    const plain = await ask(server, { path: "/app.js" });
+    assert.equal(plain.status, 200);
+    assert.ok(plain.headers.etag);
+    assert.equal(plain.headers["content-encoding"], undefined);
+    assert.equal(plain.headers.vary, "Accept-Encoding");
+
+    const again = await ask(server, {
+      path: "/app.js",
+      headers: { "if-none-match": plain.headers.etag },
+    });
+    assert.equal(again.status, 304);
+    assert.equal(again.raw, "");
+
+    const zipped = await ask(server, { path: "/app.js", headers: { "accept-encoding": "gzip" } });
+    assert.equal(zipped.status, 200);
+    assert.equal(zipped.headers["content-encoding"], "gzip");
+    assert.ok(Number(zipped.headers["content-length"]) < Number(plain.headers["content-length"]));
+
+    const image = await ask(server, {
+      path: "/spartan-live.png",
+      headers: { "accept-encoding": "gzip" },
+    });
+    assert.equal(image.status, 200);
+    assert.equal(image.headers["content-encoding"], undefined);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+

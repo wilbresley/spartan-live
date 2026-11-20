@@ -48,6 +48,16 @@ import {
   rememberViewMode,
   viewModeLabel,
 } from "./view-mode.mjs";
+import {
+  ROLE_ADMIN,
+  accountLink,
+  deleteBlocked,
+  nameProblem,
+  normalizeName,
+  roleLabel,
+  sortUsers,
+  userState,
+} from "./users-ui.mjs";
 
 const loginView = document.querySelector("#login-view");
 const passwordView = document.querySelector("#password-view");
@@ -834,6 +844,7 @@ async function flushChime(now) {
   }
 }
 let viewerRole = "owner";
+let viewerIsAdmin = false;
 let viewerGuestKind = "";
 let guestTempInvite = null;
 let guestPermInvite = null;
@@ -932,7 +943,7 @@ function finishEnterApp() {
   hideViewModeAsk();
   showApp();
   paintGuest();
-  if (viewerRole === "owner") return loadGuestBar().then(() => refresh());
+  if (viewerRole !== "guest") return loadGuestBar().then(() => refresh());
   return refresh();
 }
 
@@ -1012,7 +1023,7 @@ function paintAudienceList() {
 }
 
 async function openAudience() {
-  if (viewerRole !== "owner") return;
+  if (viewerRole === "guest") return;
   try {
     const data = await api("/api/audience");
     audienceCache = Array.isArray(data.lives) ? data.lives : [];
@@ -1040,6 +1051,7 @@ function showGuestGone(reason) {
   appView.classList.add("hidden");
   hideNickGate();
   closeAudience();
+  closeUsers();
   guestGone.classList.remove("hidden");
   guestGoneGif.src = SAD_GIFS[guestGifIndex] || SAD_GIFS[0];
   guestGoneTimer = window.setInterval(() => {
@@ -1049,7 +1061,12 @@ function showGuestGone(reason) {
   }, 4000);
 }
 
+function paintAdminTools() {
+  document.querySelector("#m-set-people")?.classList.toggle("hidden", !viewerIsAdmin);
+}
+
 function paintGuest() {
+  paintAdminTools();
   if (viewerRole === "guest" && viewerGuestKind !== "permanent" && guestTempInvite && guestTempInvite.exp <= Date.now()) {
     guestTempInvite = null;
     showGuestGone("expired");
@@ -1088,7 +1105,7 @@ function paintGuest() {
 }
 
 async function loadGuestBar() {
-  if (viewerRole !== "owner") return;
+  if (viewerRole === "guest") return;
   try {
     const data = await api("/api/guest");
     guestTempInvite = data.temporary?.active ? data.temporary : null;
@@ -1105,7 +1122,10 @@ function showLogin() {
   stopAll();
   hideGuestGone();
   viewerRole = "owner";
+  viewerIsAdmin = false;
   viewerGuestKind = "";
+  paintAdminTools();
+  closeUsers();
   guestTempInvite = null;
   guestPermInvite = null;
   guestPicking = false;
@@ -2840,7 +2860,7 @@ document.querySelector("#guest-revoke-confirm").addEventListener("click", async 
 
 if (audienceOpen) {
   audienceOpen.addEventListener("click", () => {
-    if (viewerRole !== "owner") return;
+    if (viewerRole === "guest") return;
     openAudience();
   });
 }
@@ -2853,11 +2873,212 @@ audiencePop?.addEventListener("click", (event) => {
   if (event.target === audiencePop) closeAudience();
 });
 
+const usersPop = document.querySelector("#users-pop");
+const usersList = document.querySelector("#users-list");
+const usersEmpty = document.querySelector("#users-empty");
+const usersForm = document.querySelector("#users-create");
+const usersNameInput = document.querySelector("#users-name");
+const usersMessage = document.querySelector("#users-message");
+const usersLinkBox = document.querySelector("#users-link");
+const usersLinkFor = document.querySelector("#users-link-for");
+const usersLinkUrl = document.querySelector("#users-link-url");
+const usersLinkCopy = document.querySelector("#users-link-copy");
+const usersClose = document.querySelector("#users-close");
+let usersCache = [];
+let usersMe = "";
+let usersArmed = "";
+let usersArmTimer = 0;
+let usersCopyTimer = 0;
+
+function sayUsers(text) {
+  if (!usersMessage) return;
+  usersMessage.textContent = text || "";
+  usersMessage.classList.toggle("hidden", !text);
+}
+
+function showUsersLink(name, path) {
+  const url = accountLink(location.origin, path);
+  if (!usersLinkBox || !usersLinkUrl || !usersLinkFor || !url) {
+    sayUsers("Não consegui montar o link dessa conta. Gere outro.");
+    return;
+  }
+  usersLinkFor.textContent = `Link de primeiro acesso de ${name} (vale 7 dias e só abre uma vez)`;
+  usersLinkUrl.value = url;
+  usersLinkBox.classList.remove("hidden");
+  if (usersLinkCopy) usersLinkCopy.textContent = "Copiar";
+  usersLinkUrl.select?.();
+}
+
+function paintUsers() {
+  if (!usersList) return;
+  usersList.replaceChildren();
+  const rows = sortUsers(usersCache);
+  usersEmpty?.classList.toggle("hidden", rows.length > 0);
+  for (const user of rows) {
+    const state = userState(user);
+    const item = document.createElement("li");
+    item.className = "users-row";
+    item.dataset.user = user.user;
+    const who = document.createElement("div");
+    who.className = "users-who";
+    const name = document.createElement("strong");
+    name.textContent = user.user;
+    const meta = document.createElement("em");
+    meta.className = `users-meta users-meta-${state.kind}`;
+    meta.textContent = `${roleLabel(user.role)} · ${state.label}`;
+    who.append(name, meta);
+    const tools = document.createElement("div");
+    tools.className = "users-tools";
+    const reset = document.createElement("button");
+    reset.type = "button";
+    reset.dataset.act = "reset";
+    reset.textContent = "Novo link";
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.dataset.act = "delete";
+    const blocked = deleteBlocked(user, usersMe, usersCache);
+    const armed = usersArmed === user.user;
+    remove.textContent = blocked ? "Excluir" : armed ? "Confirmar?" : "Excluir";
+    remove.classList.toggle("is-armed", armed && !blocked);
+    if (blocked) {
+      remove.disabled = true;
+      remove.title = blocked;
+    }
+    tools.append(reset, remove);
+    item.append(who, tools);
+    usersList.append(item);
+  }
+}
+
+async function loadUsers() {
+  const data = await api("/api/admin/users");
+  usersCache = Array.isArray(data.users) ? data.users : [];
+  usersMe = typeof data.admin === "string" ? data.admin : "";
+  usersArmed = "";
+  paintUsers();
+}
+
+async function openUsers() {
+  if (!viewerIsAdmin || !usersPop) return;
+  usersArmed = "";
+  window.clearTimeout(usersArmTimer);
+  sayUsers("");
+  usersLinkBox?.classList.add("hidden");
+  usersPop.classList.remove("hidden");
+  try {
+    await loadUsers();
+  } catch (error) {
+    sayUsers(error.message || "Não consegui carregar as contas.");
+  }
+}
+
+function closeUsers() {
+  usersArmed = "";
+  window.clearTimeout(usersArmTimer);
+  window.clearTimeout(usersCopyTimer);
+  usersPop?.classList.add("hidden");
+}
+
+async function resetAccount(name) {
+  try {
+    const data = await api("/api/admin/users/reset", { method: "POST", body: JSON.stringify({ user: name }) });
+    usersArmed = "";
+    window.clearTimeout(usersArmTimer);
+    await loadUsers();
+    showUsersLink(name, data.path);
+    sayUsers(`Link novo de ${name}. Vale 7 dias e só abre uma vez.`);
+  } catch (error) {
+    sayUsers(error.message || "Não consegui gerar o link.");
+  }
+}
+
+async function removeAccount(name) {
+  try {
+    await api("/api/admin/users/delete", { method: "POST", body: JSON.stringify({ user: name }) });
+    usersArmed = "";
+    usersLinkBox?.classList.add("hidden");
+    await loadUsers();
+    sayUsers(`Conta ${name} excluída. O acesso dela caiu na hora.`);
+  } catch (error) {
+    sayUsers(error.message || "Não consegui excluir a conta.");
+  }
+}
+
+usersList?.addEventListener("click", async (event) => {
+  const button = event.target?.closest?.("button[data-act]");
+  if (!button || button.disabled) return;
+  const name = button.closest(".users-row")?.dataset.user || "";
+  if (!name) return;
+  if (button.dataset.act === "reset") {
+    await resetAccount(name);
+    return;
+  }
+  if (usersArmed !== name) {
+    usersArmed = name;
+    window.clearTimeout(usersArmTimer);
+    usersArmTimer = window.setTimeout(() => {
+      usersArmed = "";
+      paintUsers();
+    }, 4000);
+    paintUsers();
+    return;
+  }
+  await removeAccount(name);
+});
+
+usersForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const problem = nameProblem(usersNameInput?.value || "");
+  if (problem) {
+    sayUsers(problem);
+    return;
+  }
+  const name = normalizeName(usersNameInput.value);
+  try {
+    const data = await api("/api/admin/users", { method: "POST", body: JSON.stringify({ user: name }) });
+    usersForm.reset();
+    await loadUsers();
+    showUsersLink(name, data.path);
+    sayUsers(`Conta ${name} criada. Mande o link para a pessoa.`);
+  } catch (error) {
+    sayUsers(error.message || "Não consegui criar a conta.");
+  }
+});
+
+usersLinkCopy?.addEventListener("click", async () => {
+  const url = usersLinkUrl?.value || "";
+  if (!url) return;
+  try {
+    await navigator.clipboard.writeText(url);
+  } catch {
+    usersLinkUrl.select();
+    document.execCommand("copy");
+  }
+  usersLinkCopy.textContent = "Copiado";
+  window.clearTimeout(usersCopyTimer);
+  usersCopyTimer = window.setTimeout(() => {
+    if (usersLinkCopy) usersLinkCopy.textContent = "Copiar";
+  }, 2000);
+});
+
+document.querySelector("#m-set-users")?.addEventListener("click", openUsers);
+usersClose?.addEventListener("click", closeUsers);
+usersPop?.addEventListener("click", (event) => {
+  if (event.target === usersPop) closeUsers();
+});
+// Escape fecha o diálogo mesmo com o cursor dentro do campo de nome.
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (!usersPop || usersPop.classList.contains("hidden")) return;
+  event.stopPropagation();
+  closeUsers();
+}, true);
+
 nickForm?.addEventListener("submit", (event) => {
   event.preventDefault();
   const nick = cleanNick(nickInput?.value || "");
   if (!nick) {
-    if (nickError) nickError.textContent = "O apelido precisa ter 2 a 24 letras, números, espaço, _ ou -.";
+    if (nickError) nickError.textContent = "O apelido precisa ter 2 a 24 letras sem acento, números, espaço, _ ou -.";
     return;
   }
   rememberNick(nick);
@@ -2869,7 +3090,7 @@ const timer = window.setInterval(() => {
   if (nickGateOpen() || viewGateOpen()) return;
   if (guestTempInvite || guestPermInvite) paintGuest();
   if (!appView.classList.contains("hidden")) {
-    if (viewerRole === "owner") loadGuestBar();
+    if (viewerRole !== "guest") loadGuestBar();
     refresh();
   }
 }, 3000);
@@ -2892,7 +3113,9 @@ api("/api/me")
       showPasswordGate();
       return;
     }
-    viewerRole = me.role === "guest" ? "guest" : "owner";
+    viewerRole = me.role === "guest" ? "guest" : me.role === "admin" ? "owner" : "user";
+    viewerIsAdmin = me.role === ROLE_ADMIN;
+    paintAdminTools();
     if (Number(me.accessId) === 3) viewerGuestKind = "permanent";
     else if (Number(me.accessId) === 2) viewerGuestKind = "temporary";
     else viewerGuestKind = me.kind || "";

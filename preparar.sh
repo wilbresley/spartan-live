@@ -9,11 +9,21 @@ fi
 
 viewer_user="${VIEWER_USER:-spartan}"
 session="$(openssl rand -hex 32)"
+mtx_auth="$(openssl rand -hex 32)"
 publisher_pass="$(openssl rand -hex 24)"
 site_pass="$(openssl rand -hex 24)"
 
 if [ -f .env ] && [ -f motor/mediamtx.yml ]; then
   echo ".env e motor/mediamtx.yml já existem. Não alterei senha nenhuma."
+  if ! grep -q '^MTX_AUTH_SECRET=' .env; then
+    echo
+    echo "Este .env é de antes das contas por pessoa. Para cada um publicar com a própria conta:"
+    echo "  1. acrescente MTX_AUTH_SECRET=\$(openssl rand -hex 32) no .env"
+    echo "  2. em motor/mediamtx.yml, use authMethod: http e authHTTPAddress com esse segredo"
+    echo "     (motor/mediamtx.yml.example mostra o bloco pronto)"
+    echo "  3. ./subir.sh"
+    echo "Enquanto isso, o motor aceita só a credencial antiga PUBLISH_USER / PUBLISH_PASSWORD."
+  fi
 else
   if [ -f .env ] || [ -f motor/mediamtx.yml ]; then
     echo "Existe só um dos dois: .env ou motor/mediamtx.yml. Não gerei senha nova pra não dessincronizar."
@@ -26,30 +36,36 @@ MTX_API_URL=http://spartan-live-motor:9997
 MTX_HLS_URL=http://spartan-live-motor:8888
 MTX_USER=site
 MTX_PASSWORD=${site_pass}
+MTX_AUTH_SECRET=${mtx_auth}
 PUBLISH_USER=publisher
 PUBLISH_PASSWORD=${publisher_pass}
 PORT=8080
 EOF
   sed \
+    -e "s/TROQUE_SEGREDO_MOTOR/${mtx_auth}/" \
     -e "s/TROQUE_SENHA_PUBLISHER/${publisher_pass}/" \
     -e "s/TROQUE_SENHA_SITE/${site_pass}/" \
     motor/mediamtx.yml.example > motor/mediamtx.yml
   echo "Criei .env e motor/mediamtx.yml"
-  echo "Login da página: ${viewer_user}"
-  echo "Senha da página: spartanadmin"
-  echo "Na primeira entrada o site pede uma senha nova."
-  echo "Senha do programa de transmitir: ${publisher_pass}"
-  if [ ! -f publisher/publish.json ]; then
-    cat > publisher/publish.json <<EOF
+  echo "Admin da página: ${viewer_user}"
+  echo "A senha inicial dele é sorteada na primeira subida do site e aparece uma vez:"
+  echo "  docker compose logs spartan-live-site | grep 'Senha inicial'"
+  echo "  (ou: docker exec spartan-live-site cat /app/data/admin-inicial.txt)"
+  echo "Cada pessoa que for transmitir ganha uma conta própria em Pessoas → Contas de acesso, no site."
+  echo "Esqueceu a senha do admin? ./admin-reset.sh link ${viewer_user}"
+  echo "Credencial antiga do programa .exe (só durante a troca): ${publisher_pass}"
+fi
+
+if [ ! -f publisher/publish.json ]; then
+  mkdir -p publisher
+  cat > publisher/publish.json <<EOF
 {
   "host": "",
-  "port": 1935,
-  "user": "publisher",
-  "password": "${publisher_pass}"
+  "port": 1935
 }
 EOF
-    echo "Criei publisher/publish.json. O servidor fica em branco: cada pessoa escreve o IP ou o domínio no programa."
-  fi
+  echo "Criei publisher/publish.json. O servidor fica em branco: cada pessoa escreve o IP ou o domínio no programa."
+  echo "O programa novo não leva senha embutida: cada um digita o apelido e a senha da própria conta."
 fi
 
 echo

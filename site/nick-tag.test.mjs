@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { cleanNick, kindMark, sortPeople } from "./public/nick-tag.mjs";
 
-test("apelido do crachá tem 2 a 24 caracteres e não aceita vazio", () => {
-  assert.equal(cleanNick("  João  "), "João");
+test("apelido do crachá tem 2 a 24 caracteres, sem acento, e não aceita vazio", () => {
+  assert.equal(cleanNick("  Jose  "), "Jose");
+  assert.equal(cleanNick("Jose Silva"), "Jose Silva");
+  assert.equal(cleanNick("  João  "), "");
+  assert.equal(cleanNick("Jose\u0301"), "");
   assert.equal(cleanNick("A"), "");
   assert.equal(cleanNick("   "), "");
   assert.equal(cleanNick("x".repeat(25)), "");

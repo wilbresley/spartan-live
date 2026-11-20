@@ -1,6 +1,4 @@
 {
   "host": "",
-  "port": 1935,
-  "user": "publisher",
-  "password": "a-mesma-senha-publisher-do-mediamtx"
+  "port": 1935
 }

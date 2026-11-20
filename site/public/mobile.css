@@ -447,3 +447,42 @@ body.view-mobile .arrival-toast {
   right: 10px;
   max-width: none;
 }
+
+/* Contas de acesso (admin) no celular: alvos grandes e linha empilhada. */
+@media (max-width: 520px) {
+  #users-pop { padding: 10px; }
+
+  .users-card {
+    max-height: 92dvh;
+    padding: 18px;
+    border-radius: 16px;
+  }
+
+  .users-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .users-tools { width: 100%; }
+
+  .users-tools button {
+    flex: 1;
+    min-height: 40px;
+    font-size: 13px;
+  }
+
+  .users-create button { height: 44px; }
+
+  .users-link-url { font-size: 11px; }
+
+  .users-link button { min-height: 40px; }
+
+  .users-actions { width: 100%; }
+
+  .users-actions button {
+    flex: 1;
+    min-height: 44px;
+  }
+}
+

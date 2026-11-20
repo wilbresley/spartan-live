@@ -1,6 +1,10 @@
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
+if (-not (Test-Path "publish.json")) {
+  Copy-Item "publish.json.example" "publish.json"
+  Write-Host "Criei publish.json a partir do publish.json.example (host em branco, porta 1935)."
+}
 python -m pip install --user -r requirements.txt
 $extra = @(
   "--exclude-module", "tkinter",

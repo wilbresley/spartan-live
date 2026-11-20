@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 import winreg
 from urllib.parse import quote
@@ -184,14 +185,16 @@ def notify_targets(host, action):
 
 
 def notify_publisher(host, nick, user, password, action, extra=None):
+    """Avisa o site. Devolve "ok", "auth" (conta recusada), "net" ou "" (nada a fazer)."""
     targets = notify_targets(host, action)
     if not targets or not nick or not user or not password:
-        return
+        return ""
     payload = {"name": nick, "user": user, "password": password}
     if isinstance(extra, dict):
         payload.update(extra)
     body = json.dumps(payload).encode("utf-8")
     last_error = "falhou"
+    refused = False
     for url in targets:
         request = urllib.request.Request(
             url,
@@ -203,10 +206,16 @@ def notify_publisher(host, nick, user, password, action, extra=None):
             with urllib.request.urlopen(request, timeout=4) as response:
                 response.read()
             log_event(f"{action} aceito apelido={nick}")
-            return
+            return "ok"
+        except urllib.error.HTTPError as error:
+            # 401/403 é a conta: senha errada, conta sem senha ou apelido de outra pessoa.
+            if error.code in (401, 403):
+                refused = True
+            last_error = f"{type(error).__name__} {error.code}"
         except Exception as error:
             last_error = type(error).__name__
     log_event(f"{action} falhou apelido={nick} {last_error}")
+    return "auth" if refused else "net"
 
 
 def notify_stopped(host, nick, user, password):
@@ -366,7 +375,7 @@ def clean_display_nick(value):
     if not 2 <= len(text) <= 24:
         return ""
     for ch in text:
-        if ch.isalnum() or ch in " _-":
+        if ch.isascii() and (ch.isalnum() or ch in " _-"):
             continue
         return ""
     return text
@@ -576,10 +585,37 @@ def load_json(path, default):
     return default
 
 
+NICK_PATTERN = re.compile(r"[a-z0-9_-]{2,24}\Z")
+
+
+def clean_nick(text):
+    """Deixa o apelido no formato da conta do site: minúsculo, ASCII, _ e -."""
+    kept = "".join(ch for ch in str(text or "") if ch.isascii() and (ch.isalnum() or ch in "_-"))
+    return kept.lower()[:24]
+
+
 def valid_nick(nick):
-    if not 2 <= len(nick) <= 24:
-        return False
-    return all(ch.isalnum() or ch in "_-" for ch in nick)
+    """Apelido do caminho da live: só ASCII minúsculo, igual ao nome da conta no site."""
+    return bool(NICK_PATTERN.match(str(nick or "")))
+
+
+def account_credentials(nick, password):
+    """Conta do site: o apelido É o usuário, a senha é a da conta.
+
+    Devolve (user, senha) ou ("", "") quando falta alguma coisa — aí quem chama
+    avisa a pessoa em vez de tentar publicar sem conta. O apelido não é
+    "limpo" aqui de propósito: trocar "josé" por "jos" entraria na conta errada.
+    """
+    user = str(nick or "").strip().lower()
+    secret = str(password or "")
+    if not valid_nick(user) or not secret:
+        return "", ""
+    return user, secret
+
+
+def credentials_denied(status):
+    """O site recusou a conta (senha errada ou apelido de outra pessoa)."""
+    return status == "auth"
 
 
 class _GUID(ctypes.Structure):
@@ -4458,8 +4494,9 @@ def clean_host(value, fallback=""):
 
 
 def rtmp_url(publish, nick):
-    user = quote(str(publish["user"]), safe="")
-    password = quote(str(publish["password"]), safe="")
+    # publish.json guarda só host e porta: a conta vem da tela (Opção 1).
+    user = quote(str(publish.get("user") or ""), safe="")
+    password = quote(str(publish.get("password") or ""), safe="")
     host = clean_host(publish.get("host"), "")
     port = int(publish.get("port") or 1935)
     return f"rtmp://{host}:{port}/{nick}?user={user}&pass={password}"
@@ -5010,6 +5047,7 @@ class App(QWidget):
         self._audience_dialog = None
         self._replay_dir = None
         self._site_live = True
+        self._live_account = ("", "")
         self._restream_live = ""
         self._last_viewer_poll = 0.0
         self._hotkeys_installed = False
@@ -5538,7 +5576,8 @@ class App(QWidget):
         hint.setStyleSheet(f"color: {self.muted};")
         self._content_layout.addWidget(hint)
 
-        self.nick = _QtVar(self.settings.get("nick", ""))
+        self.nick = _QtVar(clean_nick(self.settings.get("nick", "")))
+        self.password = _QtVar(str(self.settings.get("password") or ""))
         self.host = _QtVar(clean_host(self.settings.get("host") or "", ""))
         self.restream = _QtVar(str(self.settings.get("restream") or ""))
         chosen = parse_quality(self.settings.get("quality"), self.settings.get("fps"))
@@ -5547,13 +5586,27 @@ class App(QWidget):
         if self.monitor_index.get() >= len(self.monitors):
             self.monitor_index.set(0)
 
+        account_row = QWidget(self.content)
+        account_box = QHBoxLayout(account_row)
+        account_box.setContentsMargins(0, 0, 0, 0)
+        account_box.setSpacing(8)
         self._field(
             "Apelido",
             self.nick,
-            hint="Até 24 caracteres. Use letras, números, _ e -.",
+            hint="Nome da conta no site, em minúscula.",
             max_len=24,
             allow="nick",
+            target=account_box,
         )
+        self._field(
+            "Senha",
+            self.password,
+            hint="A senha dessa conta no site.",
+            max_len=128,
+            allow="secret",
+            target=account_box,
+        )
+        self._content_layout.addWidget(account_row)
         dest_check_style = (
             f"""
             QCheckBox {{ color: {self.fg}; spacing: 6px; }}
@@ -5884,7 +5937,7 @@ class App(QWidget):
         self.content.setMinimumSize(base_w, base_h)
         self.content.resize(target_w, target_h)
 
-    def _field(self, label, variable, hint="", max_len=0, allow=""):
+    def _field(self, label, variable, hint="", max_len=0, allow="", target=None):
         box = QWidget(self.content)
         vbox = QVBoxLayout(box)
         vbox.setContentsMargins(0, 0, 0, 0)
@@ -5910,18 +5963,27 @@ class App(QWidget):
             """
         )
 
+        if allow == "secret":
+            entry.setEchoMode(QLineEdit.EchoMode.Password)
+            entry.setToolTip("É a senha da sua conta no site, não a do link de primeiro acesso.")
+
         def _apply_text(txt):
             text = str(txt or "")
             if allow == "nick":
-                text = "".join(ch for ch in text if ch.isalnum() or ch in "_-")
-                if max_len > 0:
-                    text = text[:int(max_len)]
-                if text != entry.text():
+                kept = clean_nick(text)
+                if any(not ch.isascii() for ch in text):
+                    entry.setToolTip('Apelido sem acento: escreva "jose" em vez de "josé".')
+                elif kept != text.strip():
+                    entry.setToolTip("O apelido é o nome da conta: tudo em minúscula.")
+                else:
+                    entry.setToolTip("")
+                if kept != entry.text():
                     cursor = entry.cursorPosition()
                     entry.blockSignals(True)
-                    entry.setText(text)
-                    entry.setCursorPosition(min(cursor, len(text)))
+                    entry.setText(kept)
+                    entry.setCursorPosition(min(cursor, len(kept)))
                     entry.blockSignals(False)
+                text = kept
             variable._value = text
 
         entry.textChanged.connect(_apply_text)
@@ -5934,7 +5996,7 @@ class App(QWidget):
             tip.setWordWrap(True)
             tip.setStyleSheet(f"color: {self.muted};")
             vbox.addWidget(tip)
-        self._content_layout.addWidget(box)
+        (self._content_layout if target is None else target).addWidget(box)
         return entry
 
     def _choice(self, label, variable, labels, volume_var=None, volume_cmd=None, before_open=None, refresh_cmd=None, targets_provider=None, sound_provider=None):
@@ -6140,8 +6202,7 @@ class App(QWidget):
             return
         nick = self.live_nick
         host = self.live_host
-        user = str(self.publish.get("user") or "")
-        password = str(self.publish.get("password") or "")
+        user, password = self._live_creds()
         if not (nick and host and user and password):
             return
         temp, perm = self._share_flags()
@@ -6291,8 +6352,7 @@ class App(QWidget):
                 self._last_viewer_poll = now
                 nick = self.live_nick
                 host = self.live_host
-                user = str(self.publish.get("user") or "")
-                password = str(self.publish.get("password") or "")
+                user, password = self._live_creds()
                 if nick and host and user and password:
                     threading.Thread(
                         target=self._poll_viewers_worker,
@@ -6335,7 +6395,9 @@ class App(QWidget):
         if 0 <= saved_idx < len(getattr(self, "monitors", [])) and self.monitors[saved_idx].get("kind") == "window":
             saved_idx = 0
         data = {
-            "nick": self.nick.get().strip(),
+            "nick": clean_nick(self.nick.get()),
+            # Fica só neste computador (%APPDATA%), como a antiga credencial do publish.json.
+            "password": str(self.password.get() if hasattr(self, "password") else ""),
             "host": clean_host(self.host.get(), ""),
             "site": bool(self.site_check.isChecked()) if hasattr(self, "site_check") else True,
             "restream": clean_restream_url(self.restream.get()) if hasattr(self, "restream") else "",
@@ -6396,8 +6458,19 @@ class App(QWidget):
         replay_on = bool(self.replay_check.isChecked()) if hasattr(self, "replay_check") else False
         self.button.config(text=start_action_label(site_on, restream, replay_on))
 
+    def _live_creds(self):
+        """Conta capturada no start; worker nenhum lê o campo da tela."""
+        return getattr(self, "_live_account", ("", "")) or ("", "")
+
+    def _site_login(self, nick=None):
+        """Conta do site: o apelido é o usuário e a senha é a do campo Senha."""
+        name = self.nick.get() if nick is None else nick
+        secret = self.password.get() if hasattr(self, "password") else ""
+        return account_credentials(name, secret)
+
     def start(self):
-        nick = self.nick.get().strip()
+        nick = clean_nick(self.nick.get())
+        self.nick.set(nick)
         host = clean_host(self.host.get(), "")
         self.host.set(host)
         raw_restream = str(self.restream.get() or "").strip() if hasattr(self, "restream") else ""
@@ -6406,10 +6479,19 @@ class App(QWidget):
         site_on = bool(self.site_check.isChecked()) if hasattr(self, "site_check") else True
         replay_on = bool(self.replay_check.isChecked()) if hasattr(self, "replay_check") else False
         if not valid_nick(nick):
-            QMessageBox.critical(self, "Spartan Live", "O apelido precisa ter 2 a 24 letras, números, _ ou -.")
+            QMessageBox.critical(self, "Spartan Live", "O apelido precisa ter 2 a 24 letras em minúscula, sem acento, números, _ ou -.")
             return
-        if site_on and (not host or not self.publish.get("password") or not self.publish.get("user")):
+        account = self._site_login(nick)
+        if site_on and not host:
             QMessageBox.critical(self, "Spartan Live", "Falta o servidor neste programa.")
+            return
+        if site_on and not account[1]:
+            QMessageBox.critical(
+                self,
+                "Spartan Live",
+                "Digita a senha da sua conta do site.\n\nEla é a mesma do login na página. "
+                "Se ainda não tem conta, pede pro admin criar a sua em Contas de acesso.",
+            )
             return
         if restream_wanted:
             if raw_restream and not restream:
@@ -6435,6 +6517,8 @@ class App(QWidget):
         self.stopping = False
         self._site_live = site_on
         self._restream_live = restream
+        # A conta vale para a live inteira: worker nenhum lê o campo da tela depois.
+        self._live_account = account if site_on else ("", "")
         replay_dir = None
         if replay_on:
             try:
@@ -6477,6 +6561,8 @@ class App(QWidget):
 
         publish = dict(self.publish)
         publish["host"] = host
+        account = getattr(self, "_live_account", ("", "")) or ("", "")
+        publish["user"], publish["password"] = account
         site_on = bool(getattr(self, "_site_live", True))
         restream = str(getattr(self, "_restream_live", "") or "")
         site_url = rtmp_url(publish, nick) if site_on and host else ""
@@ -6494,7 +6580,13 @@ class App(QWidget):
         adapters = list_dxgi_adapters()
         log_event(format_dxgi_adapters_log(adapters, pick_best_dxgi_adapter(adapters)))
         if site_on:
-            notify_publisher(host, nick, self.publish.get("user", ""), self.publish.get("password", ""), "claim")
+            status = notify_publisher(host, nick, publish["user"], publish["password"], "claim")
+            if credentials_denied(status):
+                # Sem conta válida não adianta abrir o ffmpeg: o motor ia recusar do mesmo jeito.
+                self.live_nick = ""
+                self.live_host = ""
+                self.after(0, lambda: self._fail("A conta ou a senha não conferem no site. Confira o apelido e a senha."))
+                return
         live_audio = None
         self.after(0, lambda: self.set_status("Abrindo o som..."))
         live_audio = LiveAudio(
@@ -6702,8 +6794,9 @@ class App(QWidget):
         nick = self.live_nick
         host = self.live_host
         log_event(f"troca de {'qualidade' if kind == 'quality' else 'tela'} apelido={nick or '-'}")
+        user, password = self._live_creds()
         try:
-            notify_publisher(host, nick, self.publish.get("user", ""), self.publish.get("password", ""), "switch", {"kind": kind})
+            notify_publisher(host, nick, user, password, "switch", {"kind": kind})
         finally:
             if ticket == self._switch_ticket:
                 self._switch_ready = True
@@ -7077,7 +7170,7 @@ class App(QWidget):
         started = threading.Event()
         clock = {}
         lines = []
-        secret = str(self.publish.get("password") or "")
+        secret = self._live_creds()[1]
 
         def read_video_err():
             if not video.stderr:
@@ -7203,7 +7296,7 @@ class App(QWidget):
         self.video_proc = None
         self._track_processes(proc)
         lines = []
-        secret = str(self.publish.get("password") or "")
+        secret = self._live_creds()[1]
 
         def read_stderr():
             if not proc.stderr:
@@ -7251,9 +7344,10 @@ class App(QWidget):
         host = self.live_host
         if not nick or not host:
             return
+        user, password = self._live_creds()
         threading.Thread(
             target=notify_publisher,
-            args=(host, nick, self.publish.get("user", ""), self.publish.get("password", ""), "switch"),
+            args=(host, nick, user, password, "switch"),
             daemon=True,
         ).start()
 
@@ -7280,8 +7374,7 @@ class App(QWidget):
             return
         monitor = dict(self.monitors[index])
         ffmpeg = existing_file("ffmpeg.exe")
-        user = str(self.publish.get("user") or "")
-        password = str(self.publish.get("password") or "")
+        user, password = self._live_creds()
         threading.Thread(
             target=self._thumb_job,
             args=(ffmpeg, monitor, host, nick, user, password),
@@ -7363,7 +7456,8 @@ class App(QWidget):
             return
         self.live_nick = ""
         log_event(f"parado apelido={nick}")
-        notify_stopped(host, nick, self.publish.get("user", ""), self.publish.get("password", ""))
+        user, password = self._live_creds()
+        notify_stopped(host, nick, user, password)
 
     def destroy(self):
         try:

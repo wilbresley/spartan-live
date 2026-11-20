@@ -1,5 +1,7 @@
 **
 !server.mjs
 !password.mjs
+!users.mjs
+!admin-cli.mjs
 !public
 !public/**
