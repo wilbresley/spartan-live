@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Captura a tela e publica em Full HD no Spartan Live."""
 
+import base64
 import ctypes
 from ctypes import wintypes
 import json
@@ -113,6 +114,120 @@ def settings_path():
     return os.path.join(folder, "config.json")
 
 
+# A senha da conta fica no config.json criptografada pelo DPAPI do Windows: só
+# este usuário deste PC abre. Copiar o arquivo para outro PC não revela nada.
+SECRET_PREFIX = "dpapi:v1:"
+SECRET_ENTROPY = b"SpartanLive/config/v1"
+CRYPTPROTECT_UI_FORBIDDEN = 0x1
+
+
+class _DATA_BLOB(ctypes.Structure):
+    _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_byte))]
+
+
+def _data_blob(data):
+    raw = bytes(data)
+    buffer = ctypes.create_string_buffer(raw, len(raw))
+    return _DATA_BLOB(len(raw), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_byte)))
+
+
+def _blob_bytes(blob):
+    if not blob.cbData or not blob.pbData:
+        return b""
+    return ctypes.string_at(blob.pbData, blob.cbData)
+
+
+def _crypt32():
+    library = ctypes.WinDLL("crypt32", use_last_error=True)
+    library.CryptProtectData.restype = wintypes.BOOL
+    library.CryptUnprotectData.restype = wintypes.BOOL
+    return library
+
+
+def _kernel32():
+    library = ctypes.WinDLL("kernel32", use_last_error=True)
+    library.LocalFree.argtypes = [ctypes.c_void_p]
+    library.LocalFree.restype = ctypes.c_void_p
+    return library
+
+
+def protect_secret(text):
+    """Criptografa a senha que vai para o config.json.
+
+    Devolve "" quando não dá para criptografar: nunca cai para texto puro.
+    """
+    secret = str(text or "")
+    if not secret:
+        return ""
+    try:
+        crypt32 = _crypt32()
+        kernel32 = _kernel32()
+        data_in = _data_blob(secret.encode("utf-8"))
+        entropy = _data_blob(SECRET_ENTROPY)
+        data_out = _DATA_BLOB()
+        ok = crypt32.CryptProtectData(
+            ctypes.byref(data_in), "Spartan Live", ctypes.byref(entropy),
+            None, None, CRYPTPROTECT_UI_FORBIDDEN, ctypes.byref(data_out),
+        )
+        if not ok or not data_out.pbData:
+            return ""
+        try:
+            return SECRET_PREFIX + base64.b64encode(_blob_bytes(data_out)).decode("ascii")
+        finally:
+            kernel32.LocalFree(ctypes.cast(data_out.pbData, ctypes.c_void_p))
+    except Exception:
+        return ""
+
+
+def unprotect_secret(stored):
+    """Devolve a senha guardada. Outro PC, outro usuário do Windows ou blob ruim: ""."""
+    text = str(stored or "")
+    if not text.startswith(SECRET_PREFIX):
+        return ""
+    try:
+        raw = base64.b64decode(text[len(SECRET_PREFIX):], validate=True)
+    except Exception:
+        return ""
+    if not raw:
+        return ""
+    try:
+        crypt32 = _crypt32()
+        kernel32 = _kernel32()
+        data_in = _data_blob(raw)
+        entropy = _data_blob(SECRET_ENTROPY)
+        data_out = _DATA_BLOB()
+        ok = crypt32.CryptUnprotectData(
+            ctypes.byref(data_in), None, ctypes.byref(entropy),
+            None, None, CRYPTPROTECT_UI_FORBIDDEN, ctypes.byref(data_out),
+        )
+        if not ok or not data_out.pbData:
+            return ""
+        try:
+            return _blob_bytes(data_out).decode("utf-8", "replace")
+        finally:
+            kernel32.LocalFree(ctypes.cast(data_out.pbData, ctypes.c_void_p))
+    except Exception:
+        return ""
+
+
+def stored_secret(settings):
+    """Senha do config.json. Devolve (senha, precisa_regravar).
+
+    O formato antigo guardava "password" em texto puro: a senha volta marcada
+    para regravar, e quem chama grava já criptografada e apaga o texto.
+    """
+    data = settings if isinstance(settings, dict) else {}
+    plain = str(data.get("password") or "")
+    stored = str(data.get("password_enc") or "")
+    if stored:
+        secret = unprotect_secret(stored)
+        if secret:
+            return secret, bool(plain)
+    if plain:
+        return plain, True
+    return "", bool(stored)
+
+
 _LOG_LOCK = threading.Lock()
 _log_pruned = False
 
@@ -176,7 +291,7 @@ def looks_like_ip(host):
 
 def notify_targets(host, action):
     text = clean_host(host, "")
-    if action not in ("stop", "claim", "switch", "thumb", "viewers", "share") or not text:
+    if action not in ("stop", "claim", "switch", "thumb", "viewers", "share", "login") or not text:
         return []
     local = f"http://{text}:8097/api/{action}"
     if looks_like_ip(text):
@@ -220,6 +335,48 @@ def notify_publisher(host, nick, user, password, action, extra=None):
 
 def notify_stopped(host, nick, user, password):
     notify_publisher(host, nick, user, password, "stop")
+
+
+def login_account(host, user, password):
+    """Confere a conta no site. Devolve (estado, papel, troca_senha).
+
+    estado: "ok" entrou, "auth" conta ou senha não conferem, "wait" tentativas
+    demais (429 do site) e "net" não cheguei no servidor. Só "ok" esconde o
+    formulário: recusa, 429 e falta de rede mantêm apelido e senha à mostra.
+    """
+    targets = notify_targets(host, "login")
+    if not targets or not user or not password:
+        return "net", "", False
+    body = json.dumps({"user": str(user), "password": str(password)}).encode("utf-8")
+    for url in targets:
+        request = urllib.request.Request(
+            url,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=4) as response:
+                reply = response.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as error:
+            log_event(f"login recusado apelido={user} http={error.code}")
+            if error.code in (401, 403):
+                return "auth", "", False
+            if error.code == 429:
+                return "wait", "", False
+            continue
+        except Exception as error:
+            log_event(f"login falhou apelido={user} {type(error).__name__}")
+            continue
+        try:
+            data = json.loads(reply)
+        except ValueError:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        log_event(f"login aceito apelido={user}")
+        return "ok", str(data.get("role") or ""), bool(data.get("mustChange"))
+    return "net", "", False
 
 
 def grab_thumb(ffmpeg, monitor):
@@ -701,6 +858,79 @@ def capture_clock_wait_s(mode):
 def wgc_miss_limit(fps):
     """Quantos misses seguidos até cair no PrintWindow (~1 s)."""
     return max(30, int(fps or 30))
+
+
+BORDER_MODE_AUTO = "auto"
+BORDER_MODE_BORDERLESS = "sem_borda"
+BORDER_MODE_PERFORMANCE = "desempenho"
+BORDERLESS_BUILD = 20348
+PRINTWINDOW_MAX_FRAMES = 2.0
+
+
+def border_mode_from_setting(raw):
+    """Texto da config -> modo de borda. Valor estranho vira automático."""
+    value = str(raw or "").strip().lower()
+    if value in (BORDER_MODE_BORDERLESS, "sem-borda", "borda_oculta", "sem"):
+        return BORDER_MODE_BORDERLESS
+    if value in (BORDER_MODE_PERFORMANCE, "com_borda", "desempenho_maximo"):
+        return BORDER_MODE_PERFORMANCE
+    return BORDER_MODE_AUTO
+
+
+def windows_build_number():
+    """Build do Windows (19045 no 10, 26200 no 11)."""
+    try:
+        return int(sys.getwindowsversion().build or 0)
+    except Exception:
+        return 0
+
+
+def borderless_capture_supported(build=None):
+    """IGraphicsCaptureSession3 (esconder a borda do WGC) só existe do build 20348 em diante.
+
+    No Windows 10 (19044/19045) a interface não existe: quem pega janela por Windows
+    Graphics Capture fica com a caixa amarela na tela do amigo. É por isso que lá a
+    janela vai pelo PrintWindow."""
+    number = windows_build_number() if build is None else int(build or 0)
+    return number >= BORDERLESS_BUILD
+
+
+def window_capture_plan(preference, remembered, hide_available):
+    """Como pegar a janela: "printwindow" (sem borda), "wgc" (rápido) ou "probe" (testar).
+
+    Ordem: escolha do usuário, memória do programa, e só depois a prova do PrintWindow."""
+    mode = border_mode_from_setting(preference)
+    if mode == BORDER_MODE_BORDERLESS:
+        return "printwindow"
+    if mode == BORDER_MODE_PERFORMANCE:
+        return "wgc"
+    memory = str(remembered or "").strip().lower()
+    if memory == "wgc":
+        return "wgc"
+    if hide_available:
+        return "wgc"
+    if memory == "printwindow":
+        return "printwindow"
+    return "probe"
+
+
+def probe_verdict(state, seconds, fps):
+    """Resultado da prova do PrintWindow: "printwindow" (sem borda) ou "wgc" (rápido).
+
+    "ok" dentro de dois quadros = o PrintWindow dá conta no fps atual. Preto, falhou ou
+    travou = WGC (imagem preta costuma ser tela de carregamento, então não se memoriza).
+    `seconds` é o custo médio por quadro."""
+    if state != "ok":
+        return "wgc"
+    interval = 1.0 / float(max(1, int(fps or 30)))
+    return "wgc" if float(seconds or 0) > interval * PRINTWINDOW_MAX_FRAMES else "printwindow"
+
+
+def probe_log_motivo(state, seconds):
+    """Texto do log da prova: custo por quadro quando tem imagem, segundos quando não voltou."""
+    if state in ("travou", "falhou"):
+        return f"prova={state} {float(seconds or 0):.2f}s"
+    return f"prova={state} {float(seconds or 0) * 1000.0:.1f}ms/q"
 
 
 def format_adapter_mb(vram):
@@ -1237,7 +1467,7 @@ def encoder_args(encoder, fps, height=1080):
         limit = f"{rate}M"
         window = f"{rate * 2}M"
     else:
-        rate = (14 if fps >= 60 else 8) if hardware else (12 if fps >= 60 else 8)
+        rate = 10 if fps >= 60 else 6
         limit = f"{rate}M"
         window = f"{rate * 2}M"
     common = ["-b:v", limit, "-maxrate", limit, "-bufsize", window, "-g", gop, "-bf", "0", "-pix_fmt", "yuv420p"]
@@ -1887,7 +2117,7 @@ class _CURSORINFO(ctypes.Structure):
 
 
 class _WGCWindowGrabber:
-    """Captura acelerada Windows Graphics Capture com IsBorderRequired=False (sem borda amarela)."""
+    """Captura acelerada Windows Graphics Capture. A borda amarela só some do build 20348 em diante."""
 
     def __init__(self, hwnd):
         self.hwnd = int(hwnd or 0)
@@ -2111,8 +2341,9 @@ class _WGCWindowGrabber:
                 finally:
                     _release(sess3)
 
-            # Sem API de borda (ou se falhar), o WGC segue mesmo assim.
-            # PrintWindow em jogo DirectX costuma travar; a borda amarela é o menor mal.
+            # Sem API de borda (Windows 10) ou se o sistema recusar, o WGC segue mesmo assim:
+            # PrintWindow em jogo DirectX pode travar. Quem decide trocar para o PrintWindow é o
+            # WindowVideoFeeder, que antes faz uma prova com prazo (probe_window_printwindow).
             if _com(self.session, 6, ctypes.c_long)(self.session) < 0:
                 self.fail_reason = "start"
                 self.close()
@@ -2487,6 +2718,123 @@ def frame_pointer_blank(bits, width, height, samples=12, ceiling=12):
     return True
 
 
+class _WIN32_RECT(ctypes.Structure):
+    _fields_ = [
+        ("left", ctypes.c_long),
+        ("top", ctypes.c_long),
+        ("right", ctypes.c_long),
+        ("bottom", ctypes.c_long),
+    ]
+
+
+PRINTWINDOW_PROBE_TIMEOUT = 1.2
+PRINTWINDOW_PROBE_FRAMES = 3
+PRINTWINDOW_RATE_SECONDS = 2.0
+PRINTWINDOW_RATE_FLOOR = 0.8
+
+
+def capture_rate_poor(frames, seconds, fps, floor=PRINTWINDOW_RATE_FLOOR):
+    """A captura não sustentou o fps pedido: quadros entregues abaixo do esperado.
+
+    Um PrintWindow rápido num quadro isolado não garante taxa: em fullhd o custo por
+    quadro passa do intervalo e a transmissão vira VFR (GOP de 60 quadros esticado para
+    1,5 s), o que desmonta as partes do HLS e enrosca a live de todo mundo. A conta da
+    taxa real decide a troca para o WGC."""
+    span = float(seconds or 0)
+    if span <= 0:
+        return False
+    wanted = float(fps or 30) * span * max(0.1, float(floor))
+    return float(frames or 0) < wanted
+
+
+def probe_window_printwindow(hwnd, timeout_s=PRINTWINDOW_PROBE_TIMEOUT,
+                             frames=PRINTWINDOW_PROBE_FRAMES):
+    """Alguns quadros da janela pelo PrintWindow, com prazo: (estado, segundos/quadro).
+
+    estado: "ok" (tem imagem), "preto" (pintou tudo preto), "falhou" (não pintou) ou
+    "travou" (não voltou no prazo). Jogo que engancha o PrintWindow não pode segurar a
+    transmissão: o prazo devolve o controle e a captura volta para o WGC.
+
+    O tempo volta por quadro (média): um quadro sozinho pode enganar a prova, e é a taxa
+    que diz se a janela aguenta o fps do fullhd."""
+    hwnd = int(hwnd or 0)
+    if not hwnd:
+        return "falhou", 0.0
+    try:
+        user32 = ctypes.windll.user32
+        gdi32 = ctypes.windll.gdi32
+        box = _WIN32_RECT()
+        cw = ch = 0
+        if user32.GetClientRect(hwnd, ctypes.byref(box)):
+            cw = int(box.right - box.left)
+            ch = int(box.bottom - box.top)
+        flags = 3  # PW_CLIENTONLY | PW_RENDERFULLCONTENT
+        if cw <= 8 or ch <= 8:
+            frame = _WIN32_RECT()
+            if user32.GetWindowRect(hwnd, ctypes.byref(frame)):
+                cw = int(frame.right - frame.left)
+                ch = int(frame.bottom - frame.top)
+            flags = 2  # PW_RENDERFULLCONTENT
+        if cw <= 8 or ch <= 8:
+            return "falhou", 0.0
+        screen_dc = user32.GetDC(None)
+        mem_dc = gdi32.CreateCompatibleDC(screen_dc)
+        bmi = _BITMAPINFOHEADER()
+        bmi.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+        bmi.biWidth = cw
+        bmi.biHeight = -ch
+        bmi.biPlanes = 1
+        bmi.biBitCount = 32
+        bmi.biCompression = 0
+        bits = ctypes.c_void_p()
+        bitmap = gdi32.CreateDIBSection(screen_dc, ctypes.byref(bmi), 0, ctypes.byref(bits), None, 0)
+        if not mem_dc or not bitmap or not bits.value:
+            if bitmap:
+                gdi32.DeleteObject(bitmap)
+            if mem_dc:
+                gdi32.DeleteDC(mem_dc)
+            if screen_dc:
+                user32.ReleaseDC(None, screen_dc)
+            return "falhou", 0.0
+        old = gdi32.SelectObject(mem_dc, bitmap)
+        answer = {"painted": 0}
+        limit = max(0.2, float(timeout_s))
+        started = time.perf_counter()
+
+        def paint():
+            for _ in range(max(1, int(frames or 1))):
+                try:
+                    if not bool(user32.PrintWindow(hwnd, mem_dc, flags)):
+                        break
+                except Exception:
+                    break
+                answer["painted"] += 1
+                if time.perf_counter() - started >= limit:
+                    break
+
+        worker = threading.Thread(target=paint, daemon=True)
+        worker.start()
+        worker.join(limit + 0.2)
+        seconds = time.perf_counter() - started
+        if worker.is_alive():
+            # A linha ainda pode estar dentro do PrintWindow: não apaga o que ela usa.
+            return "travou", seconds
+        painted = int(answer["painted"])
+        try:
+            if painted <= 0:
+                return "falhou", seconds
+            per_frame = seconds / float(painted)
+            return ("preto" if frame_pointer_blank(bits.value, cw, ch) else "ok"), per_frame
+        finally:
+            if old:
+                gdi32.SelectObject(mem_dc, old)
+            gdi32.DeleteObject(bitmap)
+            gdi32.DeleteDC(mem_dc)
+            user32.ReleaseDC(None, screen_dc)
+    except Exception:
+        return "falhou", 0.0
+
+
 def process_is_elevated():
     try:
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
@@ -2592,12 +2940,19 @@ def resolve_program_pid(exe, windows, remembered_pid=0, alive=None):
 
 
 class WindowVideoFeeder:
-    """Captura somente a janela/jogo escolhido sem borda amarela (Win10 e Win11) e entrega quadros BGRA contínuos."""
+    """Captura somente a janela/jogo escolhido e entrega quadros BGRA contínuos.
 
-    def __init__(self, hwnd, pipe_name, width, height, fps, pid=0, exe=""):
+    Sem borda amarela sempre que o Windows deixar: no Windows 11 o WGC esconde a borda;
+    no Windows 10 a janela vai pelo PrintWindow, com uma prova de ~1 s antes."""
+
+    def __init__(self, hwnd, pipe_name, width, height, fps, pid=0, exe="",
+                 border_mode=BORDER_MODE_AUTO, border_memory=None, remember_border=None):
         self.hwnd = int(hwnd or 0)
         self.pid = int(pid or 0)
         self.exe = str(exe or "")
+        self.border_mode = border_mode_from_setting(border_mode)
+        self.border_memory = dict(border_memory) if isinstance(border_memory, dict) else {}
+        self.remember_border = remember_border
         self.pipe_name = pipe_name
         self.width = max(2, int(width) & ~1)
         self.height = max(2, int(height) & ~1)
@@ -2689,6 +3044,58 @@ class WindowVideoFeeder:
         if self.hwnd:
             self._seen.add(self.hwnd)
 
+    def _remembered_capture(self):
+        """O que a config guardou para este programa: "printwindow", "wgc" ou nada."""
+        name = self.exe.strip().lower()
+        if not name:
+            return ""
+        return str(self.border_memory.get(name) or "").strip().lower()
+
+    def _keep_capture_memory(self, value):
+        """Guarda qual captura deu certo para este programa (config.json)."""
+        if value not in ("printwindow", "wgc"):
+            return
+        name = self.exe.strip().lower()
+        if not name or self._remembered_capture() == value:
+            return
+        self.border_memory[name] = value
+        hook = self.remember_border
+        if hook is None:
+            return
+        try:
+            hook(name, value)
+        except Exception:
+            pass
+
+    def _probe_printwindow(self):
+        """Prova de ~1 s (alguns quadros): o PrintWindow dá conta desta janela? (escolha, motivo)."""
+        state, seconds = probe_window_printwindow(self.hwnd)
+        verdict = probe_verdict(state, seconds, self.fps)
+        if state == "ok":
+            self._keep_capture_memory(verdict)
+        elif state in ("falhou", "travou"):
+            self._keep_capture_memory("wgc")
+        return verdict, probe_log_motivo(state, seconds)
+
+    def _capture_choice(self):
+        """Como pegar esta janela: "printwindow" (sem borda) ou "wgc" (rápido)."""
+        remembered = self._remembered_capture()
+        plan = window_capture_plan(self.border_mode, remembered, borderless_capture_supported())
+        if plan == "printwindow":
+            if border_mode_from_setting(self.border_mode) == BORDER_MODE_BORDERLESS:
+                # Escolha do usuário, mas PrintWindow travado engancha a transmissão inteira:
+                # a prova com prazo decide se dá para ir sem borda.
+                state, seconds = probe_window_printwindow(self.hwnd)
+                if state == "travou":
+                    self._keep_capture_memory("wgc")
+                    return "wgc", probe_log_motivo(state, seconds)
+            return "printwindow", ("lembrado" if remembered == "printwindow" else "escolha")
+        if plan == "wgc":
+            if border_mode_from_setting(self.border_mode) == BORDER_MODE_PERFORMANCE:
+                return "wgc", "escolha"
+            return "wgc", ("lembrado" if remembered == "wgc" else "borda-oculta")
+        return self._probe_printwindow()
+
     def open_pipe(self):
         self.close()
         self.stop = False
@@ -2743,20 +3150,39 @@ class WindowVideoFeeder:
             ctypes.memset(dst_bits.value, 0, frame_bytes)
 
         wgc = _WGCWindowGrabber(self.hwnd)
-        use_wgc = wgc.open()
-        wgc_miss = 0
-        miss_limit = wgc_miss_limit(self.fps)
+        choice, motivo = self._capture_choice()
+        use_wgc = wgc.open() if choice == "wgc" else False
+        if (
+            choice == "wgc"
+            and use_wgc
+            and not wgc.borderless_ok
+            and border_mode_from_setting(self.border_mode) == BORDER_MODE_AUTO
+        ):
+            # O sistema diz ter a API da borda mas recusou esconder: vale a prova do PrintWindow.
+            wgc.close()
+            wgc = _WGCWindowGrabber(self.hwnd)
+            choice, motivo = self._probe_printwindow()
+            use_wgc = wgc.open() if choice == "wgc" else False
         if use_wgc:
             borda = "oculta" if wgc.borderless_ok else "amarela"
             log_event(
-                f"janela wgc gpu={wgc.adapter_name or '?'} borda={borda} "
+                f"janela wgc gpu={wgc.adapter_name or '?'} borda={borda} motivo={motivo} "
                 f"hwnd={self.hwnd} pid={self.pid} exe={self.exe or '-'} fps={self.fps}"
             )
         else:
+            if not motivo or motivo == "wgc":
+                motivo = wgc.fail_reason or motivo or "?"
             log_event(
-                f"janela PrintWindow motivo={wgc.fail_reason or '?'} "
+                f"janela PrintWindow motivo={motivo} "
                 f"hwnd={self.hwnd} pid={self.pid} exe={self.exe or '-'} fps={self.fps}"
             )
+        wgc_miss = 0
+        pw_miss = 0
+        miss_limit = wgc_miss_limit(self.fps)
+        rate_frames = 0
+        rate_since = 0.0
+        rate_poor = 0
+        rate_fallback = False
 
         def client_size():
             box = RECT()
@@ -2857,10 +3283,60 @@ class WindowVideoFeeder:
                                 ox, oy, fw, fh = fit_aspect_box(cw, ch, self.width, self.height)
                                 if fw < self.width or fh < self.height:
                                     ctypes.memset(dst_bits.value, 0, frame_bytes)
-                                gdi32.SetStretchBltMode(dst_dc, 4)
-                                gdi32.SetBrushOrgEx(dst_dc, 0, 0, None)
-                                gdi32.StretchBlt(dst_dc, ox, oy, fw, fh, src_dc, 0, 0, cw, ch, 0x00CC0020)
+                                if (ox, oy) == (0, 0) and (fw, fh) == (cw, ch):
+                                    # Mesmo tamanho: cópia direta. O StretchBlt custa o dobro
+                                    # e o quadro do fullhd não cabe mais no intervalo do fps.
+                                    gdi32.BitBlt(dst_dc, 0, 0, fw, fh, src_dc, 0, 0, 0x00CC0020)
+                                else:
+                                    # COLORONCOLOR (3): no 1080p mediu 16-22 ms contra 36-43 ms
+                                    # do HALFTONE (4). É a diferença entre 60 fps e ~25 fps.
+                                    gdi32.SetStretchBltMode(dst_dc, 3)
+                                    gdi32.StretchBlt(
+                                        dst_dc, ox, oy, fw, fh, src_dc, 0, 0, cw, ch, 0x00CC0020
+                                    )
                                 grabbed = True
+                                pw_miss = 0
+                                if rate_since <= 0.0:
+                                    rate_since = now
+                                rate_frames += 1
+                                span = now - rate_since
+                                if span >= PRINTWINDOW_RATE_SECONDS:
+                                    slow = capture_rate_poor(rate_frames, span, self.fps)
+                                    rate_poor = rate_poor + 1 if slow else 0
+                                    if (
+                                        rate_poor >= 2
+                                        and not rate_fallback
+                                        and border_mode_from_setting(self.border_mode) != BORDER_MODE_BORDERLESS
+                                    ):
+                                        # Dois períodos seguidos abaixo do fps: o GOP estica, as
+                                        # partes do HLS desmontam e a live de todos enrosca.
+                                        rate_fallback = True
+                                        log_event(
+                                            f"PrintWindow lento para {self.fps}fps "
+                                            f"taxa={rate_frames / span:.0f}fps, volta o wgc "
+                                            f"hwnd={self.hwnd} exe={self.exe or '-'}"
+                                        )
+                                        self._keep_capture_memory("wgc")
+                                        wgc.close()
+                                        wgc = _WGCWindowGrabber(self.hwnd)
+                                        use_wgc = wgc.open()
+                                        wgc_miss = 0
+                                    rate_frames = 0
+                                    rate_since = now
+                            else:
+                                pw_miss += 1
+                                forced = border_mode_from_setting(self.border_mode) == BORDER_MODE_BORDERLESS
+                                if pw_miss >= miss_limit and not forced:
+                                    # O jogo parou de aceitar o PrintWindow: antes imagem preta que travada.
+                                    log_event(
+                                        f"PrintWindow sem quadro, volta o wgc borda=amarela "
+                                        f"miss={pw_miss} hwnd={self.hwnd} exe={self.exe or '-'}"
+                                    )
+                                    pw_miss = 0
+                                    self._keep_capture_memory("wgc")
+                                    wgc.close()
+                                    wgc = _WGCWindowGrabber(self.hwnd)
+                                    use_wgc = wgc.open()
                     if dst_bits.value and (grabbed or getattr(self, "_wgc_seen", False)):
                         self._watch_blank(dst_bits.value, frame_bytes, now)
                 elif presence == "minimized":
@@ -2898,7 +3374,21 @@ class WindowVideoFeeder:
                             self._adopt(found)
                             wgc.close()
                             wgc = _WGCWindowGrabber(self.hwnd)
-                            use_wgc = wgc.open()
+                            choice, motivo = self._capture_choice()
+                            use_wgc = wgc.open() if choice == "wgc" else False
+                            if use_wgc:
+                                borda = "oculta" if wgc.borderless_ok else "amarela"
+                                log_event(
+                                    f"janela wgc gpu={wgc.adapter_name or '?'} borda={borda} motivo={motivo} "
+                                    f"hwnd={self.hwnd} pid={self.pid} exe={self.exe or '-'} fps={self.fps}"
+                                )
+                            else:
+                                if not motivo or motivo == "wgc":
+                                    motivo = wgc.fail_reason or motivo or "?"
+                                log_event(
+                                    f"janela PrintWindow motivo={motivo} "
+                                    f"hwnd={self.hwnd} pid={self.pid} exe={self.exe or '-'} fps={self.fps}"
+                                )
                             wgc_miss = 0
                             src_size = (0, 0)
                             fresh_w, fresh_h = client_size()
@@ -3714,6 +4204,38 @@ class _ChoicePopup(QFrame):
         super().hideEvent(event)
         if self.owner.popup is self:
             self.owner.popup = None
+
+
+class _MenuPopup(QFrame):
+    """Menu do botão Conta: duas linhas curtas, fecha ao clicar fora."""
+
+    def __init__(self, items, field, fg, accent, line):
+        super().__init__(None, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint)
+        self.setStyleSheet(
+            f"QFrame {{ background-color: {field}; border: 1px solid {line}; border-radius: 10px; }}"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(1)
+        for label, command in items:
+            item = QLabel(label, self)
+            item.setFont(QFont("Segoe UI", 10))
+            item.setCursor(Qt.CursorShape.PointingHandCursor)
+            item.setStyleSheet(
+                f"QLabel {{ background-color: {field}; color: {fg}; padding: 7px 14px; border-radius: 6px; border: none; }}"
+                f"QLabel:hover {{ background-color: {accent}; color: #f6f1f1; }}"
+            )
+            item.mousePressEvent = lambda _ev, cmd=command: self._pick(cmd)
+            layout.addWidget(item)
+        self.setFixedWidth(210)
+
+    def _pick(self, command):
+        self.hide()
+        self.close()
+        try:
+            command()
+        except Exception:
+            pass
 
 
 class _TargetCard(QFrame):
@@ -5048,12 +5570,21 @@ class App(QWidget):
         self._replay_dir = None
         self._site_live = True
         self._live_account = ("", "")
+        self._account_ok = False
+        self._account_role = ""
+        self._login_busy = False
+        self._pending_start = False
+        self._dest_edit = False
+        self._secret_rewrite = False
+        self._account_popup = None
         self._restream_live = ""
         self._last_viewer_poll = 0.0
         self._hotkeys_installed = False
         self._window_feeder = None
         self.publish = load_json(existing_file("publish.json"), {})
         self.settings = load_json(settings_path(), {})
+        saved_borders = self.settings.get("borda_exes")
+        self._border_memory = dict(saved_borders) if isinstance(saved_borders, dict) else {}
         self.base_monitors = list_monitors()
         self.windows = list_windows()
         self.monitors = [*self.base_monitors, *self.windows]
@@ -5061,6 +5592,11 @@ class App(QWidget):
         if safe_geom:
             self.geometry(safe_geom)
         self._build()
+        if self._secret_rewrite:
+            try:
+                self.save_settings()
+            except OSError:
+                pass
         self._tray_job = None
         self._dragging = False
         self.show()
@@ -5285,6 +5821,21 @@ class App(QWidget):
         hbox = QHBoxLayout(bar)
         hbox.setContentsMargins(8, 0, 0, 0)
         hbox.setSpacing(0)
+        self.account_button = _LabelProxy("Conta", bar)
+        self.account_button.setFixedHeight(34)
+        self.account_button.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.account_button.setFont(QFont("Segoe UI", 10))
+        self.account_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.account_button.setStyleSheet(
+            f"QLabel {{ background-color: {self.bg}; color: {self.muted}; padding: 0px 10px; }}"
+            f"QLabel:hover {{ background-color: #2a2a2a; color: {self.fg}; }}"
+        )
+        self.account_button.setToolTip("Conta: servidor, Restreamer e sair.")
+        self.account_button.mousePressEvent = (
+            lambda ev: self._account_menu() if ev.button() == Qt.MouseButton.LeftButton else None
+        )
+        self.account_button.hide()
+        hbox.addWidget(self.account_button)
         hbox.addStretch(1)
         self._maximized = False
         self._restore_geom = None
@@ -5577,7 +6128,8 @@ class App(QWidget):
         self._content_layout.addWidget(hint)
 
         self.nick = _QtVar(clean_nick(self.settings.get("nick", "")))
-        self.password = _QtVar(str(self.settings.get("password") or ""))
+        secret, self._secret_rewrite = stored_secret(self.settings)
+        self.password = _QtVar(secret)
         self.host = _QtVar(clean_host(self.settings.get("host") or "", ""))
         self.restream = _QtVar(str(self.settings.get("restream") or ""))
         chosen = parse_quality(self.settings.get("quality"), self.settings.get("fps"))
@@ -5590,7 +6142,7 @@ class App(QWidget):
         account_box = QHBoxLayout(account_row)
         account_box.setContentsMargins(0, 0, 0, 0)
         account_box.setSpacing(8)
-        self._field(
+        self.nick_entry = self._field(
             "Apelido",
             self.nick,
             hint="Nome da conta no site, em minúscula.",
@@ -5598,7 +6150,7 @@ class App(QWidget):
             allow="nick",
             target=account_box,
         )
-        self._field(
+        self.password_entry = self._field(
             "Senha",
             self.password,
             hint="A senha dessa conta no site.",
@@ -5606,6 +6158,14 @@ class App(QWidget):
             allow="secret",
             target=account_box,
         )
+        account_box.setStretch(0, 1)
+        account_box.setStretch(1, 1)
+        self.login_button = PillButton(account_row, "Entrar", self._login_click, self.bg, self.accent, "#f6f1f1", height=36)
+        self.login_button.setToolTip("Confere a conta no site. Depois disso ela fica no canto de cima.")
+        account_box.addWidget(self.login_button, 0, Qt.AlignmentFlag.AlignBottom)
+        self.nick_entry.returnPressed.connect(self._login_click)
+        self.password_entry.returnPressed.connect(self._login_click)
+        self.account_row = account_row
         self._content_layout.addWidget(account_row)
         dest_check_style = (
             f"""
@@ -5667,6 +6227,7 @@ class App(QWidget):
         )
         host_bar.addWidget(host_entry, 1)
         host_vbox.addWidget(host_row)
+        self.host_box = host_box
         self._content_layout.addWidget(host_box)
 
         dest_row = QWidget(self.content)
@@ -5703,6 +6264,7 @@ class App(QWidget):
             else None,
         )
         dest_box.addWidget(self.restream_entry, 1)
+        self.dest_row = dest_row
         self._content_layout.addWidget(dest_row)
 
         self.monitor_labels = [monitor_label(i, monitor) for i, monitor in enumerate(self.monitors)] or ["Tela 1"]
@@ -5719,6 +6281,27 @@ class App(QWidget):
             targets_provider=lambda: self.monitors,
         )
         self.monitor_choice.trace_add("write", lambda *_args: self._screen_changed())
+
+        self.border_row = QWidget(self.content)
+        border_bar = QHBoxLayout(self.border_row)
+        border_bar.setContentsMargins(0, 0, 0, 0)
+        border_bar.setSpacing(8)
+        self.border_check = _CheckProxy("Sem a borda amarela", self.border_row)
+        self.border_check.setFont(QFont("Segoe UI", 10))
+        self.border_check.setChecked(
+            border_mode_from_setting(self.settings.get("borda")) == BORDER_MODE_BORDERLESS
+        )
+        self.border_check.setStyleSheet(dest_check_style)
+        self.border_check.setToolTip(
+            "O Windows 10 desenha uma caixa amarela em volta da janela durante a transmissão. "
+            "Marcado, o programa pega a janela de um jeito que não tem borda. "
+            "Se o jogo travar a imagem, ele volta sozinho para o jeito com borda."
+        )
+        self.border_check.toggled.connect(self._border_toggled)
+        border_bar.addWidget(self.border_check)
+        border_bar.addStretch(1)
+        self._content_layout.addWidget(self.border_row)
+        self._sync_border_check()
 
         self.pc_devices = []
         self.mic_devices = []
@@ -6113,6 +6696,7 @@ class App(QWidget):
         widget = getattr(self, "monitor_choice_widget", None)
         if widget is not None:
             widget.redraw()
+        self._sync_border_check()
 
     def _paint_quality(self):
         current = self.quality.get()
@@ -6394,10 +6978,12 @@ class App(QWidget):
         saved_idx = self.selected_monitor()
         if 0 <= saved_idx < len(getattr(self, "monitors", [])) and self.monitors[saved_idx].get("kind") == "window":
             saved_idx = 0
+        secret = str(self.password.get() if hasattr(self, "password") else "")
         data = {
             "nick": clean_nick(self.nick.get()),
-            # Fica só neste computador (%APPDATA%), como a antiga credencial do publish.json.
-            "password": str(self.password.get() if hasattr(self, "password") else ""),
+            # Só neste computador (%APPDATA%) e criptografada pelo DPAPI do Windows:
+            # Sair apaga. O antigo "password" em texto puro não é mais escrito.
+            "password_enc": protect_secret(secret),
             "host": clean_host(self.host.get(), ""),
             "site": bool(self.site_check.isChecked()) if hasattr(self, "site_check") else True,
             "restream": clean_restream_url(self.restream.get()) if hasattr(self, "restream") else "",
@@ -6410,12 +6996,15 @@ class App(QWidget):
             "pc_volume": clamp_gain(self.pc_volume.get()) if hasattr(self, "pc_volume") else 100,
             "mic_volume": clamp_gain(self.mic_volume.get()) if hasattr(self, "mic_volume") else 100,
             "start_with_windows": bool(self.start_with_windows.get()),
+            "borda": self._border_mode_setting(),
+            "borda_exes": dict(getattr(self, "_border_memory", {}) or {}),
         }
         geom = valid_saved_geom(self._current_window_geom(), getattr(self, "base_monitors", self.monitors))
         if geom:
             data["window_geom"] = geom
         with open(settings_path(), "w", encoding="utf-8") as handle:
             json.dump(data, handle)
+        self._secret_rewrite = False
 
     def _startup_toggled(self):
         enabled = bool(self.start_with_windows.get())
@@ -6468,6 +7057,165 @@ class App(QWidget):
         secret = self.password.get() if hasattr(self, "password") else ""
         return account_credentials(name, secret)
 
+    def _apply_login_state(self, ok):
+        """Logado: somem apelido, senha, servidor e Restreamer; no topo fica Conta."""
+        self._account_ok = bool(ok)
+        if not self._account_ok:
+            self._dest_edit = False
+        if hasattr(self, "account_row"):
+            self.account_row.setVisible(not self._account_ok)
+        self._paint_dest_edit()
+        button = getattr(self, "account_button", None)
+        if button is not None:
+            nick = clean_nick(self.nick.get())
+            button.setText(f"Conta · {nick}" if self._account_ok and nick else "Conta")
+            button.setVisible(self._account_ok)
+            button.setToolTip(
+                f"Conta de {nick}: servidor, Restreamer e sair."
+                if self._account_ok and nick
+                else "Conta: servidor, Restreamer e sair."
+            )
+        self._sync_viewport()
+
+    def _paint_dest_edit(self):
+        """Servidor e Restreamer: sempre à mostra fora da conta, opcionais dentro dela."""
+        show = (not getattr(self, "_account_ok", False)) or bool(getattr(self, "_dest_edit", False))
+        if hasattr(self, "host_box"):
+            self.host_box.setVisible(show)
+        if hasattr(self, "dest_row"):
+            self.dest_row.setVisible(show)
+
+    def _toggle_dest_edit(self):
+        if not getattr(self, "_account_ok", False):
+            return
+        self._dest_edit = not bool(getattr(self, "_dest_edit", False))
+        self._paint_dest_edit()
+        self._sync_viewport()
+        self.set_status("Servidor e Restreamer à mostra." if self._dest_edit else "Servidor e Restreamer escondidos.")
+
+    def _account_menu(self):
+        """Menu do canto de cima: Servidor e Restreamer… e Sair."""
+        if not getattr(self, "_account_ok", False):
+            return
+        old = getattr(self, "_account_popup", None)
+        if old is not None:
+            try:
+                old.close()
+            except Exception:
+                pass
+            self._account_popup = None
+        popup = _MenuPopup(
+            [("Servidor e Restreamer…", self._toggle_dest_edit), ("Sair", self._logout)],
+            self.field,
+            self.fg,
+            self.accent,
+            "#3a3a3a",
+        )
+        button = getattr(self, "account_button", None)
+        if button is not None:
+            popup.move(button.mapToGlobal(QPoint(0, max(1, button.height()))))
+        self._account_popup = popup
+        popup.show()
+
+    def _login_click(self):
+        """Botão Entrar: confere a conta no site em segundo plano."""
+        if getattr(self, "_login_busy", False):
+            return
+        nick = clean_nick(self.nick.get())
+        self.nick.set(nick)
+        host = clean_host(self.host.get(), "")
+        self.host.set(host)
+        secret = str(self.password.get() if hasattr(self, "password") else "")
+        user, password = account_credentials(nick, secret)
+        if not valid_nick(nick):
+            self._pending_start = False
+            QMessageBox.critical(self, "Spartan Live", "O apelido precisa ter 2 a 24 letras em minúscula, sem acento, números, _ ou -.")
+            return
+        if not host:
+            self._pending_start = False
+            QMessageBox.critical(self, "Spartan Live", "Falta o servidor neste programa.")
+            return
+        if not user or not password:
+            self._pending_start = False
+            QMessageBox.critical(
+                self,
+                "Spartan Live",
+                "Digita a senha da sua conta do site.\n\nEla é a mesma do login na página. "
+                "Se ainda não tem conta, pede pro admin criar a sua em Contas de acesso.",
+            )
+            return
+        self._login_busy = True
+        if hasattr(self, "login_button"):
+            self.login_button.setEnabled(False)
+            self.login_button.config(text="Entrando…")
+        self.set_status("Conferindo a conta no site…")
+
+        def worker():
+            state, role, must_change = login_account(host, user, password)
+            self.after(0, lambda: self._login_done(state, role, must_change))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _login_done(self, state, role="", must_change=False):
+        """Fim do Entrar. Recusa, 429 e falta de rede deixam o formulário à mostra."""
+        self._login_busy = False
+        if hasattr(self, "login_button"):
+            self.login_button.setEnabled(True)
+            self.login_button.config(text="Entrar")
+        if state == "ok":
+            self._account_role = str(role or "")
+            try:
+                self.save_settings()
+            except OSError:
+                pass
+            self._apply_login_state(True)
+            nick = clean_nick(self.nick.get())
+            if must_change:
+                self.set_status("Conta do primeiro acesso: troque a senha no site antes de transmitir.")
+            else:
+                self.set_status(f"Conta de {nick} conferida.")
+            if getattr(self, "_pending_start", False):
+                self._pending_start = False
+                self.start()
+            return
+        self._pending_start = False
+        self._apply_login_state(False)
+        if state == "auth":
+            self.set_status("Conta ou senha não conferem.")
+            QMessageBox.critical(
+                self,
+                "Spartan Live",
+                "Conta ou senha não conferem.\n\nUse a mesma senha do login na página. "
+                "Se a conta ainda está com a senha do primeiro acesso, troque no site.",
+            )
+        elif state == "wait":
+            self.set_status("Tentativas demais. Espere uns minutos e tente de novo.")
+            QMessageBox.critical(self, "Spartan Live", "Tentativas demais. Espere uns minutos e tente de novo.")
+        else:
+            self.set_status("Não consegui chegar no servidor.")
+            QMessageBox.critical(
+                self,
+                "Spartan Live",
+                "Não consegui chegar no servidor.\n\nConfere o endereço do servidor e a internet.",
+            )
+
+    def _logout(self):
+        """Sair: apaga a senha da memória e do config.json e volta o formulário."""
+        if self.running:
+            QMessageBox.information(self, "Spartan Live", "Pare a transmissão antes de sair da conta.")
+            return
+        if hasattr(self, "password"):
+            self.password.set("")
+        self._account_role = ""
+        self._apply_login_state(False)
+        try:
+            self.save_settings()
+        except OSError:
+            pass
+        self.set_status("Saiu da conta. Digite a senha para entrar de novo.")
+        if hasattr(self, "password_entry"):
+            self.password_entry.setFocus()
+
     def start(self):
         nick = clean_nick(self.nick.get())
         self.nick.set(nick)
@@ -6510,6 +7258,11 @@ class App(QWidget):
         ffmpeg = existing_file("ffmpeg.exe")
         if not ffmpeg:
             QMessageBox.critical(self, "Spartan Live", "Não achei o ffmpeg neste programa.")
+            return
+        if site_on and not getattr(self, "_account_ok", False):
+            # Clicou Transmitir sem entrar: confere a conta e volta para cá sozinho.
+            self._pending_start = True
+            self._login_click()
             return
 
         self.save_settings()
@@ -6744,12 +7497,63 @@ class App(QWidget):
         self.set_status(f"Trocando a qualidade para {label}...")
         threading.Thread(target=self._announce_switch, args=(ticket, "quality"), daemon=True).start()
 
+    def _sync_border_check(self):
+        """O botão da borda só faz sentido quando o alvo é janela ou jogo."""
+        row = getattr(self, "border_row", None)
+        if row is None:
+            return
+        index = self.selected_monitor() if hasattr(self, "monitor_choice") else 0
+        monitors = getattr(self, "monitors", []) or []
+        target = monitors[index] if 0 <= index < len(monitors) else None
+        row.setVisible(bool(isinstance(target, dict) and target.get("kind") == "window"))
+
+    def _border_toggled(self):
+        try:
+            self.save_settings()
+        except OSError:
+            pass
+        if self.running:
+            self.set_status("A borda amarela muda na próxima transmissão.")
+
+    def _border_mode_setting(self):
+        raw = border_mode_from_setting(self.settings.get("borda"))
+        check = getattr(self, "border_check", None)
+        if check is None:
+            return raw
+        if check.isChecked():
+            return BORDER_MODE_BORDERLESS
+        return BORDER_MODE_PERFORMANCE if raw == BORDER_MODE_PERFORMANCE else BORDER_MODE_AUTO
+
+    def _remember_border(self, exe, value):
+        """Guarda na config qual captura deu certo para este programa (roda na linha da captura)."""
+        name = str(exe or "").strip().lower()
+        if not name or value not in ("printwindow", "wgc"):
+            return
+        book = getattr(self, "_border_memory", None)
+        if not isinstance(book, dict):
+            book = {}
+            self._border_memory = book
+        if book.get(name) == value:
+            return
+        book[name] = value
+        try:
+            self.after(0, self._save_border_settings)
+        except Exception:
+            pass
+
+    def _save_border_settings(self):
+        try:
+            self.save_settings()
+        except OSError:
+            pass
+
     def _screen_changed(self):
         if getattr(self, "_closed_window_hold", False):
             label = self.monitor_choice.get() if hasattr(self, "monitor_choice") else ""
             if label not in getattr(self, "monitor_labels", []):
                 return
             self._closed_window_hold = False
+        self._sync_border_check()
         job = getattr(self, "_screen_debounce_job", None)
         if job:
             try:
@@ -7111,6 +7915,9 @@ class App(QWidget):
             mon["video_pipe"] = vpipe
             feeder = WindowVideoFeeder(
                 mon.get("hwnd", 0), vpipe, width, height, fps, mon.get("pid", 0), mon.get("exe", ""),
+                border_mode=self._border_mode_setting(),
+                border_memory=self._border_memory,
+                remember_border=self._remember_border,
             )
             try:
                 feeder.open_pipe()

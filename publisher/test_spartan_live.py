@@ -1,5 +1,7 @@
 import array
+import atexit
 import os
+import shutil
 import struct
 import subprocess
 import tempfile
@@ -47,7 +49,16 @@ from spartan_live import (
     dxgi_adapter_capture_score,
     pick_best_dxgi_adapter,
     capture_clock_wait_s,
+    capture_rate_poor,
     wgc_miss_limit,
+    BORDER_MODE_AUTO,
+    BORDER_MODE_BORDERLESS,
+    BORDER_MODE_PERFORMANCE,
+    borderless_capture_supported,
+    border_mode_from_setting,
+    probe_verdict,
+    probe_window_printwindow,
+    window_capture_plan,
     format_dxgi_adapters_log,
     format_capture_target_log,
     plan_audio,
@@ -92,6 +103,16 @@ from spartan_live import (
     usable_encoders,
     valid_nick,
 )
+
+import spartan_live
+
+# A suíte não escreve no log da máquina. Sem isso, as recusas de teste
+# (401/429/500), o "stop falhou" e o "captura parada ... frames=120" caíam no
+# %APPDATA%\SpartanLive\spartan.log e se misturavam com a live de verdade.
+_TEST_LOG_DIR = tempfile.mkdtemp(prefix="spartan-teste-log-")
+_TEST_LOG = os.path.join(_TEST_LOG_DIR, "spartan.log")
+spartan_live.log_path = lambda: _TEST_LOG
+atexit.register(shutil.rmtree, _TEST_LOG_DIR, True)
 
 
 class PublisherTests(unittest.TestCase):
@@ -287,12 +308,12 @@ class PublisherTests(unittest.TestCase):
         self.assertNotIn("gdigrab", command)
         self.assertIn("h264_nvenc", command)
         self.assertIn("-an", command)
-        self.assertIn("14M", encoder_args("h264_nvenc", 60))
-        self.assertIn("28M", encoder_args("h264_nvenc", 60))
-        self.assertIn("8M", encoder_args("h264_nvenc", 30))
+        self.assertIn("10M", encoder_args("h264_nvenc", 60))
+        self.assertIn("20M", encoder_args("h264_nvenc", 60))
+        self.assertIn("6M", encoder_args("h264_nvenc", 30))
         cpu60 = encoder_args("libx264", 60, 1080)
-        self.assertIn("12M", cpu60)
-        self.assertIn("24M", cpu60)
+        self.assertIn("10M", cpu60)
+        self.assertIn("20M", cpu60)
         self.assertIn("veryfast", cpu60)
         light = build_command(
             "ffmpeg.exe", "gdigrab", "libx264", 30,
@@ -862,6 +883,20 @@ class PublisherTests(unittest.TestCase):
         live.close()
         self.assertGreater(size, 0)
 
+    def _hide_settings(self):
+        """config.json de mentira: os testes da conta nao mexem no config real."""
+        import shutil
+
+        import spartan_live
+
+        folder = tempfile.mkdtemp(prefix="spartan-config-")
+        path = os.path.join(folder, "config.json")
+        original = spartan_live.settings_path
+        spartan_live.settings_path = lambda: path
+        self.addCleanup(shutil.rmtree, folder, True)
+        self.addCleanup(setattr, spartan_live, "settings_path", original)
+        return path
+
     def test_botao_transmitir_cabe_na_janela(self):
         from spartan_live import DEFAULT_HEIGHT, DEFAULT_WIDTH
 
@@ -1205,6 +1240,9 @@ class PublisherTests(unittest.TestCase):
                         self.assertTrue(grabber.borderless_ok)
                 finally:
                     grabber.close()
+                state, probe_seconds = probe_window_printwindow(found_wins[0]["hwnd"])
+                self.assertIn(state, ("ok", "preto", "falhou", "travou"))
+                self.assertGreaterEqual(probe_seconds, 0.0)
                 ffmpeg = os.path.join(os.path.dirname(__file__), "ffmpeg", "ffmpeg.exe")
                 if os.path.isfile(ffmpeg):
                     vpipe = rf"\\.\pipe\spartan-vid-e2e-{os.getpid()}"
@@ -1282,6 +1320,135 @@ class PublisherTests(unittest.TestCase):
         finally:
             app.destroy()
 
+    def test_borda_amarela_so_sai_do_windows_11_e_o_plano_segue_a_config(self):
+        self.assertFalse(borderless_capture_supported(19044))
+        self.assertFalse(borderless_capture_supported(19045))
+        self.assertTrue(borderless_capture_supported(20348))
+        self.assertTrue(borderless_capture_supported(22000))
+        self.assertTrue(borderless_capture_supported(26200))
+        self.assertEqual(border_mode_from_setting("sem_borda"), BORDER_MODE_BORDERLESS)
+        self.assertEqual(border_mode_from_setting("sem-borda"), BORDER_MODE_BORDERLESS)
+        self.assertEqual(border_mode_from_setting("desempenho"), BORDER_MODE_PERFORMANCE)
+        self.assertEqual(border_mode_from_setting("auto"), BORDER_MODE_AUTO)
+        self.assertEqual(border_mode_from_setting(None), BORDER_MODE_AUTO)
+        self.assertEqual(border_mode_from_setting("qualquer"), BORDER_MODE_AUTO)
+        # Windows 10 sem memória: prova o PrintWindow. Com a API da borda: WGC direto.
+        self.assertEqual(window_capture_plan(BORDER_MODE_AUTO, "", False), "probe")
+        self.assertEqual(window_capture_plan(BORDER_MODE_AUTO, "", True), "wgc")
+        self.assertEqual(window_capture_plan(BORDER_MODE_AUTO, "printwindow", False), "printwindow")
+        self.assertEqual(window_capture_plan(BORDER_MODE_AUTO, "wgc", False), "wgc")
+        self.assertEqual(window_capture_plan(BORDER_MODE_BORDERLESS, "wgc", True), "printwindow")
+        self.assertEqual(window_capture_plan(BORDER_MODE_PERFORMANCE, "printwindow", False), "wgc")
+        # Prova: rápido e com imagem = sem borda; devagar, preto ou travado = WGC.
+        self.assertEqual(probe_verdict("ok", 0.004, 30), "printwindow")
+        self.assertEqual(probe_verdict("ok", 0.02, 60), "printwindow")
+        self.assertEqual(probe_verdict("ok", 0.20, 30), "wgc")
+        self.assertEqual(probe_verdict("preto", 0.01, 30), "wgc")
+        self.assertEqual(probe_verdict("falhou", 0.01, 30), "wgc")
+        self.assertEqual(probe_verdict("travou", 1.2, 30), "wgc")
+
+    def test_printwindow_precisa_segurar_o_fps_da_live(self):
+        # Sem folga nenhuma: 120 quadros em 2 s é o 60 fps pedido.
+        self.assertFalse(capture_rate_poor(120, 2.0, 60))
+        # Até 20% abaixo do pedido ainda passa (o encoder compensa).
+        self.assertFalse(capture_rate_poor(100, 2.0, 60))
+        self.assertFalse(capture_rate_poor(50, 1.0, 30))
+        # Fullhd que só entrega ~40 fps (o caso medido com StretchBlt HALFTONE).
+        self.assertTrue(capture_rate_poor(80, 2.0, 60))
+        self.assertTrue(capture_rate_poor(40, 1.0, 60))
+        self.assertTrue(capture_rate_poor(10, 1.0, 30))
+        self.assertTrue(capture_rate_poor(0, 2.0, 60))
+        # Sem tempo medido não há veredito.
+        self.assertFalse(capture_rate_poor(10, 0.0, 60))
+
+    def test_captura_da_janela_escolhe_sem_borda_e_lembra_o_que_deu_certo(self):
+        lembrado = []
+
+        def remember(exe, value):
+            lembrado.append((exe, value))
+
+        pipe = r"\\.\pipe\spartan-vid-teste"
+
+        def feeder(exe, **kwargs):
+            return WindowVideoFeeder(
+                1234, pipe, 640, 360, 30, pid=9, exe=exe, remember_border=remember, **kwargs
+            )
+
+        with mock.patch("spartan_live.borderless_capture_supported", return_value=False):
+            with mock.patch("spartan_live.probe_window_printwindow", return_value=("ok", 0.004)):
+                rapido = feeder("EldenRing.exe")
+                self.assertEqual(rapido._capture_choice(), ("printwindow", "prova=ok 4.0ms/q"))
+                self.assertEqual(lembrado, [("eldenring.exe", "printwindow")])
+                self.assertEqual(rapido.border_memory["eldenring.exe"], "printwindow")
+                # A memória do programa pula a prova na transmissão seguinte.
+                de_novo = feeder("EldenRing.exe", border_memory=rapido.border_memory)
+                self.assertEqual(de_novo._capture_choice(), ("printwindow", "lembrado"))
+            with mock.patch("spartan_live.probe_window_printwindow", return_value=("travou", 1.2)):
+                travado = feeder("Corepunk.exe")
+                self.assertEqual(travado._capture_choice(), ("wgc", "prova=travou 1.20s"))
+                self.assertEqual(travado.border_memory["corepunk.exe"], "wgc")
+            with mock.patch("spartan_live.probe_window_printwindow", return_value=("falhou", 0.01)):
+                self.assertEqual(feeder("Bf6.exe")._capture_choice()[0], "wgc")
+            with mock.patch("spartan_live.probe_window_printwindow", return_value=("preto", 0.02)):
+                preto = feeder("Lento.exe")
+                self.assertEqual(preto._capture_choice(), ("wgc", "prova=preto 20.0ms/q"))
+                # Carregando a tela: não memoriza, a próxima transmissão prova de novo.
+                self.assertNotIn("lento.exe", preto.border_memory)
+        with mock.patch("spartan_live.probe_window_printwindow", return_value=("ok", 0.004)):
+            escolhido = feeder("EldenRing.exe", border_mode=BORDER_MODE_BORDERLESS)
+            self.assertEqual(escolhido._capture_choice(), ("printwindow", "escolha"))
+        with mock.patch("spartan_live.probe_window_printwindow", return_value=("travou", 1.2)):
+            # Nem com a caixa marcada o programa deixa a transmissão enganchar no PrintWindow.
+            teimoso = feeder("Corepunk.exe", border_mode=BORDER_MODE_BORDERLESS)
+            self.assertEqual(teimoso._capture_choice(), ("wgc", "prova=travou 1.20s"))
+            self.assertEqual(teimoso.border_memory["corepunk.exe"], "wgc")
+        desempenho = feeder("EldenRing.exe", border_mode=BORDER_MODE_PERFORMANCE)
+        self.assertEqual(desempenho._capture_choice(), ("wgc", "escolha"))
+
+    def test_botao_da_borda_amarela_aparece_so_em_janela_e_fica_salvo(self):
+        import json
+
+        path = self._hide_settings()
+        app = App()
+        try:
+            app.geometry("560x720+-2400+-2400")
+            app.update()
+            self.assertTrue(hasattr(app, "border_check"))
+            self.assertEqual(app.border_check.text(), "Sem a borda amarela")
+            self.assertFalse(app.border_check.isChecked())
+            app.monitors = [dict(item) for item in app.base_monitors]
+            app.monitors.append({
+                "kind": "window", "hwnd": 123456, "pid": 4321, "exe": "EldenRing.exe",
+                "title": "ELDEN RING", "left": 0, "top": 0, "width": 1920, "height": 1080,
+            })
+            app.monitor_labels = [monitor_label(i, m) for i, m in enumerate(app.monitors)]
+            app.monitor_choice_widget.set_labels(app.monitor_labels)
+            app.monitor_choice.set(app.monitor_labels[0])
+            app.update()
+            self.assertTrue(app.border_row.isHidden())
+            self.assertEqual(app._border_mode_setting(), BORDER_MODE_AUTO)
+            app.monitor_choice.set(app.monitor_labels[-1])
+            app.update()
+            self.assertFalse(app.border_row.isHidden())
+            app.border_check.setChecked(True)
+            app.update()
+            self.assertEqual(app._border_mode_setting(), BORDER_MODE_BORDERLESS)
+            with open(path, encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle)["borda"], BORDER_MODE_BORDERLESS)
+            app._remember_border("EldenRing.exe", "printwindow")
+            app._save_border_settings()
+            self.assertEqual(app._border_memory, {"eldenring.exe": "printwindow"})
+            with open(path, encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle)["borda_exes"], {"eldenring.exe": "printwindow"})
+            app.border_check.setChecked(False)
+            app.update()
+            self.assertEqual(app._border_mode_setting(), BORDER_MODE_AUTO)
+            app.monitor_choice.set(app.monitor_labels[0])
+            app.update()
+            self.assertTrue(app.border_row.isHidden())
+        finally:
+            app.destroy()
+
     def test_cartao_de_espera_e_clique_na_janela_nova_do_mesmo_lugar(self):
         from spartan_live import cover_source_box, load_fallback_bgra, same_live_target, target_identity
         self.assertEqual(cover_source_box(1920, 1080, 1280, 720), (0, 0, 1920, 1080))
@@ -1326,6 +1493,162 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(resolve_program_pid("firefox.exe", windows, 99, lambda pid: False), 0)
         self.assertEqual(chosen_pc_audio("exe:firefox.exe", ["Speakers"], "Speakers"), "exe:firefox.exe")
         self.assertIsInstance(process_is_elevated(), bool)
+
+    def test_senha_guardada_fica_criptografada(self):
+        import json
+
+        from spartan_live import SECRET_PREFIX, protect_secret, stored_secret, unprotect_secret
+
+        blob = protect_secret("senha-do-bresley")
+        self.assertTrue(blob.startswith(SECRET_PREFIX))
+        self.assertNotIn("senha-do-bresley", blob)
+        self.assertEqual(unprotect_secret(blob), "senha-do-bresley")
+        self.assertEqual(protect_secret(""), "")
+        self.assertEqual(unprotect_secret(""), "")
+        self.assertEqual(unprotect_secret("texto puro"), "")
+        self.assertEqual(unprotect_secret(SECRET_PREFIX + "nao-e-base64"), "")
+        self.assertEqual(stored_secret({"password": "antiga"}), ("antiga", True))
+        self.assertEqual(stored_secret({"password_enc": blob}), ("senha-do-bresley", False))
+        self.assertEqual(stored_secret({"password_enc": blob, "password": "antiga"}), ("senha-do-bresley", True))
+        self.assertEqual(stored_secret({"password_enc": SECRET_PREFIX + "ruim", "password": "antiga"}), ("antiga", True))
+        self.assertEqual(stored_secret({}), ("", False))
+        self.assertEqual(stored_secret(None), ("", False))
+
+        path = self._hide_settings()
+        app = App()
+        try:
+            app.nick.set("bresley")
+            app.password.set("senha-do-bresley")
+            app.save_settings()
+            with open(path, encoding="utf-8") as handle:
+                raw = handle.read()
+            saved = json.loads(raw)
+            self.assertNotIn("password", saved)
+            self.assertNotIn("senha-do-bresley", raw)
+            self.assertEqual(unprotect_secret(saved["password_enc"]), "senha-do-bresley")
+        finally:
+            app.destroy()
+
+    def test_entrar_esconde_campos_e_sair_traz_de_volta(self):
+        import json
+
+        from spartan_live import unprotect_secret
+
+        path = self._hide_settings()
+        app = App()
+        try:
+            app.nick.set("bresley")
+            app.password.set("senha-do-bresley")
+            app.host.set("192.168.100.16")
+            app.update()
+            self.assertFalse(app.account_row.isHidden())
+            self.assertTrue(app.account_button.isHidden())
+            app._login_done("ok", "admin", False)
+            app.update()
+            self.assertTrue(app.account_row.isHidden())
+            self.assertTrue(app.host_box.isHidden())
+            self.assertTrue(app.dest_row.isHidden())
+            self.assertFalse(app.account_button.isHidden())
+            self.assertEqual(app.account_button.text(), "Conta · bresley")
+            with open(path, encoding="utf-8") as handle:
+                self.assertEqual(unprotect_secret(json.load(handle)["password_enc"]), "senha-do-bresley")
+            app._toggle_dest_edit()
+            app.update()
+            self.assertFalse(app.host_box.isHidden())
+            self.assertFalse(app.dest_row.isHidden())
+            app._toggle_dest_edit()
+            app.update()
+            self.assertTrue(app.host_box.isHidden())
+            app._logout()
+            app.update()
+            self.assertFalse(app.account_row.isHidden())
+            self.assertFalse(app.host_box.isHidden())
+            self.assertFalse(app.dest_row.isHidden())
+            self.assertTrue(app.account_button.isHidden())
+            self.assertEqual(app.password.get(), "")
+            with open(path, encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle)["password_enc"], "")
+        finally:
+            app.destroy()
+
+    def test_entrar_recusado_mantem_campos(self):
+        self._hide_settings()
+        app = App()
+        try:
+            app.nick.set("bresley")
+            app.password.set("errada")
+            app.host.set("192.168.100.16")
+            with mock.patch("spartan_live.QMessageBox.critical") as warned:
+                app._login_done("auth")
+            self.assertTrue(warned.called)
+            self.assertFalse(app.account_row.isHidden())
+            self.assertFalse(app.host_box.isHidden())
+            self.assertFalse(app.dest_row.isHidden())
+            self.assertTrue(app.account_button.isHidden())
+            with mock.patch("spartan_live.QMessageBox.critical"):
+                app._login_done("net")
+            self.assertFalse(app.account_row.isHidden())
+            self.assertIn("servidor", app.status.cget("text"))
+            with mock.patch("spartan_live.QMessageBox.critical"):
+                app._login_done("wait")
+            self.assertFalse(app.account_row.isHidden())
+            self.assertIsNone(app._account_popup)
+        finally:
+            app.destroy()
+
+    def test_login_account_le_a_resposta_do_site(self):
+        import json
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        from spartan_live import login_account
+
+        seen = {"reply": (200, {"ok": True, "role": "admin", "mustChange": False})}
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                size = int(self.headers.get("content-length") or 0)
+                seen["path"] = self.path
+                seen["body"] = json.loads(self.rfile.read(size).decode("utf-8"))
+                code, payload = seen["reply"]
+                data = json.dumps(payload).encode("utf-8")
+                self.send_response(code)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *_args):
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        url = "http://127.0.0.1:%d/api/login" % server.server_address[1]
+        try:
+            with mock.patch("spartan_live.notify_targets", return_value=[url]):
+                self.assertEqual(login_account("127.0.0.1", "bresley", "senha"), ("ok", "admin", False))
+                self.assertEqual(seen["path"], "/api/login")
+                self.assertEqual(seen["body"], {"user": "bresley", "password": "senha"})
+                seen["reply"] = (200, {"ok": True, "role": "user", "mustChange": True})
+                self.assertEqual(login_account("127.0.0.1", "bresley", "senha"), ("ok", "user", True))
+                seen["reply"] = (401, {"error": "Nome ou senha nao confere."})
+                self.assertEqual(login_account("127.0.0.1", "bresley", "errada"), ("auth", "", False))
+                seen["reply"] = (429, {"error": "Espere um pouco."})
+                self.assertEqual(login_account("127.0.0.1", "bresley", "senha"), ("wait", "", False))
+                seen["reply"] = (500, {"error": "boom"})
+                self.assertEqual(login_account("127.0.0.1", "bresley", "senha"), ("net", "", False))
+                self.assertEqual(login_account("127.0.0.1", "", ""), ("net", "", False))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_notify_targets_inclui_login(self):
+        self.assertEqual(notify_targets("192.168.100.16", "login"), ["http://192.168.100.16:8097/api/login"])
+        self.assertEqual(
+            notify_targets("spartanlive.bresley.win", "login")[0],
+            "https://spartanlive.bresley.win/api/login",
+        )
+        self.assertEqual(notify_targets("", "login"), [])
 
 
 if __name__ == "__main__":

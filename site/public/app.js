@@ -1546,7 +1546,6 @@ function attachStream(video, name, feeder) {
       lowLatencyMode: true,
       backBufferLength: 120,
       liveDurationInfinity: true,
-      liveSyncDuration: 1.5,
       maxLiveSyncPlaybackRate: 1,
       maxAudioFramesDrift: 10,
     });
