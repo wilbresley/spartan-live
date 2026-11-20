@@ -63,7 +63,7 @@ git init -b main
 git remote add origin https://github.com/wilbresley/spartan-live.git
 git fetch origin
 git reset --hard origin/main
-git branch --set-upstream-to=origin/main
+git branch --set-upstream-to=origin/main main
 ```
 
 `git reset --hard` reescreve só os arquivos do repositório. O `.env`, o `motor/mediamtx.yml`, o `publisher/publish.json`, o `download/` e o volume `spartan-viewer` estão no `.gitignore` e ficam como estão — o login e as contas não se perdem. Depois disso, `git pull` funciona normalmente.
