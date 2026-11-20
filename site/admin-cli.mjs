@@ -26,12 +26,15 @@ import {
   saveUsers,
   setUserPassword,
 } from "./users.mjs";
+import { MESSAGE_SHORT, accountMessage } from "./public/users-ui.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || path.join(HERE, "data");
 const USERS_FILE = path.join(DATA_DIR, "users.json");
 const LEGACY_FILE = path.join(DATA_DIR, "password.json");
 const ADMIN_USER = process.env.VIEWER_USER || "spartan";
+// Endereço público do site, só para a mensagem sair pronta (ex.: https://live.exemplo.com).
+const SITE_URL = String(process.env.SITE_URL || "").trim().replace(/\/+$/, "");
 
 function usage() {
   console.log(`Uso: node admin-cli.mjs <comando>
@@ -43,7 +46,8 @@ function usage() {
   admin <usuario>      promove a admin
   delete <usuario>     exclui a conta
 
-Arquivo de contas: ${USERS_FILE}`);
+Arquivo de contas: ${USERS_FILE}
+Endereço público: ${SITE_URL || "(preencha SITE_URL no .env para a mensagem sair pronta)"}`);
 }
 
 function fail(message) {
@@ -75,9 +79,15 @@ function ask(label) {
   });
 }
 
-function linkLine(token) {
-  return `Link de primeiro acesso: /p/${token}\n` +
-    "Abra no navegador com o endereço do site na frente (ex.: http://192.168.0.10:8097/p/...). Vale 7 dias e uma vez.";
+/** Mensagem curta pronta para colar no WhatsApp; sem SITE_URL, só o caminho e a dica. */
+function linkLine(token, name) {
+  if (!SITE_URL) {
+    return `Link de primeiro acesso: /p/${token}\n` +
+      "Abra no navegador com o endereço do site na frente. Vale 7 dias e uma vez.\n" +
+      "Para sair a mensagem pronta, preencha SITE_URL no .env (ex.: SITE_URL=https://live.exemplo.com).";
+  }
+  return "Mensagem pra mandar no WhatsApp:\n" +
+    accountMessage(MESSAGE_SHORT, { name, link: `${SITE_URL}/p/${token}`, site: SITE_URL });
 }
 
 const [command = "", ...rest] = process.argv.slice(2);
@@ -104,7 +114,7 @@ if (command === "list") {
   const reset = resetUserPassword(store, name);
   if (reset.error) fail(reset.error);
   saveUsers(USERS_FILE, store);
-  console.log(linkLine(reset.token));
+  console.log(linkLine(reset.token, name));
 } else if (command === "add") {
   const name = nameArg(rest[0]);
   const role = rest[1] === "admin" ? ROLE_ADMIN : ROLE_USER;
@@ -112,7 +122,7 @@ if (command === "list") {
   if (made.error) fail(made.error);
   saveUsers(USERS_FILE, store);
   console.log(`Conta ${made.user.user} (${made.user.role}) criada.`);
-  console.log(linkLine(made.token));
+  console.log(linkLine(made.token, made.user.user));
 } else if (command === "password") {
   const name = nameArg(rest[0]);
   const plain = await ask(`Senha nova de ${name} (${MIN_PASSWORD} a ${MAX_PASSWORD} caracteres): `);

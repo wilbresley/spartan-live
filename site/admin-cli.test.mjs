@@ -12,11 +12,15 @@ function dataDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "spartan-cli-"));
 }
 
-function run(dir, ...args) {
+function runWithEnv(dir, env, ...args) {
   return execFileSync(process.execPath, [CLI, ...args], {
-    env: { ...process.env, DATA_DIR: dir, VIEWER_USER: "spartan" },
+    env: { ...process.env, DATA_DIR: dir, VIEWER_USER: "spartan", SITE_URL: "", ...env },
     encoding: "utf8",
   });
+}
+
+function run(dir, ...args) {
+  return runWithEnv(dir, {}, ...args);
 }
 
 test("sem users.json o cli cria o admin e mostra a senha inicial uma vez", () => {
@@ -52,6 +56,21 @@ test("add já devolve link de primeiro acesso e link renova o convite", () => {
   assert.equal(ana.hash, undefined, "link pendente deixa a conta sem senha");
   assert.ok(ana.first && ana.first.hash, "token guardado só como hash");
   assert.equal(JSON.stringify(store).includes(first[1]), false, "token não fica em texto puro");
+});
+
+test("com SITE_URL o cli imprime a mensagem pronta com o link completo", () => {
+  const dir = dataDir();
+  run(dir, "list");
+  const created = runWithEnv(dir, { SITE_URL: "https://live.exemplo.com/" }, "add", "ana");
+  assert.match(created, /Mensagem pra mandar no WhatsApp:/);
+  assert.match(created, /Ana, seu acesso do Spartan Live: https:\/\/live\.exemplo\.com\/p\/[A-Za-z0-9_-]{16,64}/);
+  assert.match(created, /Login: ana — a senha você define no link\. Vale 7 dias, uma vez só\. Site: https:\/\/live\.exemplo\.com/);
+  assert.equal(created.includes("192.168.0.10"), false, "sem endereço de exemplo furado");
+
+  const renewed = run(dir, "link", "ana");
+  assert.match(renewed, /Link de primeiro acesso: \/p\/[A-Za-z0-9_-]{16,64}/);
+  assert.match(renewed, /preencha SITE_URL no \.env/);
+  assert.match(run(dir, "help"), /Endereço público: \(preencha SITE_URL no \.env/);
 });
 
 test("promover e excluir respeitam o último admin", () => {

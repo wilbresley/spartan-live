@@ -37,6 +37,8 @@ MTX_USER=site
 MTX_PASSWORD=${site_pass}
 MTX_AUTH_SECRET=${mtx_auth}
 PORT=8080
+# Endereço público do site, só para o ./admin-reset.sh montar a mensagem pronta:
+# SITE_URL=https://spartanlive.exemplo.com
 EOF
   sed \
     -e "s/TROQUE_SEGREDO_MOTOR/${mtx_auth}/" \
@@ -48,6 +50,7 @@ EOF
   echo "  (ou: docker exec spartan-live-site cat /app/data/admin-inicial.txt)"
   echo "Cada pessoa que for transmitir ganha uma conta própria em Pessoas → Contas de acesso, no site."
   echo "Esqueceu a senha do admin? ./admin-reset.sh link ${viewer_user}"
+  echo "Com SITE_URL preenchido no .env, o ./admin-reset.sh imprime a mensagem pronta pra mandar no WhatsApp."
 fi
 
 if [ ! -f publisher/publish.json ]; then

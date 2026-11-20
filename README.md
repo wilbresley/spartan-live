@@ -196,7 +196,11 @@ Quem entra por esse endereço assiste a grade, o volume e o teatro, e só vê as
 
 Cada pessoa tem a própria conta em `users.json`, no volume `spartan-viewer`, com papel de admin ou de usuário. Na instalação nova, o admin é o `VIEWER_USER` (por padrão `spartan`), com senha sorteada e troca obrigatória no primeiro login. Qualquer conta com senha assiste a grade; **Pessoas → Contas de acesso** só abre para o admin.
 
-O admin cria a conta com o mesmo nome que a pessoa vai usar no programa: minúsculo, 2 a 24 caracteres, letras, números, `_` e `-`. A conta nasce **sem senha** e não entra no site nem publica até usar o link. O botão do link copia um endereço `/p/...`, que vale 7 dias e serve uma vez só: a página pede a senha nova (mínimo 8, diferente do nome da conta e fora da lista de senhas óbvias) e já entra logada.
+O admin cria a conta com o mesmo nome que a pessoa vai usar no programa: minúsculo, 2 a 24 caracteres, letras, números, `_` e `-`. A conta nasce **sem senha** e não entra no site nem publica até usar o link. O botão **Copiar link** pega o endereço `/p/...`, que vale 7 dias e serve uma vez só: a página pede a senha nova (mínimo 8, diferente do nome da conta e fora da lista de senhas óbvias) e já entra logada.
+
+Ao lado dele, **Copiar mensagem** copia esse mesmo link dentro de um texto pronto para WhatsApp: na conta nova, explica o que é o site, o login, o prazo do link e que quem também for transmitir baixa o `SpartanLive.exe` dentro do site; no link novo de quem perdeu a senha, avisa que a senha antiga parou de valer e que as sessões abertas caíram. Quem só assiste continua entrando por link de convite (`/v/...`), que não abre transmissão.
+
+Pelo terminal, `./admin-reset.sh link ana` e `./admin-reset.sh add beto` imprimem a mesma ideia em duas linhas. Com `SITE_URL=https://spartanlive.bresley.win` no `.env`, o link sai completo e pronto para colar; sem essa variável, o script mostra o caminho `/p/...` e lembra de preencher o endereço.
 
 Na mesma lista o admin redefine a senha — o link novo derruba as sessões abertas daquela conta, e o programa dela só volta a publicar digitando a senha nova —, troca o papel entre admin e usuário e exclui a conta. O último admin não sai, e ninguém exclui a própria conta. Sem `users.json` válido, o servidor guarda o arquivo quebrado de lado e cria a lista de novo.
 

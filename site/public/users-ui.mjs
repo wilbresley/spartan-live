@@ -63,6 +63,58 @@ export function accountLink(origin, path) {
   }
 }
 
+/** Nome como a pessoa lê na mensagem: primeira letra maiúscula, o login segue minúsculo. */
+export function displayName(raw) {
+  const name = normalizeName(raw);
+  if (!name) return "";
+  return name[0].toUpperCase() + name.slice(1);
+}
+
+export const MESSAGE_INVITE = "invite";
+export const MESSAGE_RESET = "reset";
+export const MESSAGE_SHORT = "short";
+
+/**
+ * Texto pronto para mandar por WhatsApp, com o link dentro.
+ * invite = conta nova (primeiro acesso); reset = link novo de quem perdeu a senha;
+ * short = duas linhas, para o terminal ou para quem já conhece o site.
+ * Sem site, as linhas que repetem o endereço saem fora; sem nome ou link, "".
+ */
+export function accountMessage(kind, { name = "", link = "", site = "" } = {}) {
+  const who = displayName(name);
+  const login = normalizeName(name);
+  const url = String(link || "").trim();
+  const base = String(site || "").trim().replace(/\/+$/, "");
+  if (!who || !url) return "";
+
+  if (kind === MESSAGE_SHORT) {
+    const tail = base ? ` Site: ${base}` : "";
+    return `${who}, seu acesso do Spartan Live: ${url}\n` +
+      `Login: ${login} — a senha você define no link. Vale 7 dias, uma vez só.${tail}`;
+  }
+
+  if (kind === MESSAGE_RESET) {
+    return [
+      `Oi, ${who}. Gerei uma senha nova pra sua conta do *Spartan Live*.`,
+      "A senha antiga parou de valer agora, e as sessões abertas caíram. Escolha a nova no link abaixo — vale *7 dias* e serve *uma vez*.",
+      `👉 ${url}`,
+      base ? `*Login:* ${login}\nSite: ${base}` : `*Login:* ${login}`,
+    ].join("\n\n");
+  }
+
+  return [
+    `Oi, ${who}! 👋`,
+    "Criei seu acesso ao *Spartan Live*, a página onde a gente transmite a tela do jogo ao vivo — você abre no navegador e assiste, sem instalar nada.",
+    `*Login:* ${login}\n*Senha:* você escolhe agora, no link abaixo (mínimo 8 caracteres).`,
+    `👉 ${url}`,
+    base
+      ? "O link vale *7 dias* e só abre *uma vez*. Se vencer, me pede outro.\n" +
+        `Depois de salvar a senha, guarda o endereço do site pra entrar direto: ${base}`
+      : "O link vale *7 dias* e só abre *uma vez*. Se vencer, me pede outro.",
+    "Se você também vai transmitir, o programa é o SpartanLive.exe — dá pra baixar dentro do site, em Ajustes.",
+  ].join("\n\n");
+}
+
 /** Motivo para não excluir a conta ("" = pode excluir). Espelha as travas do servidor. */
 export function deleteBlocked(user, me, users) {
   const name = normalizeName(user?.user);

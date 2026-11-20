@@ -881,9 +881,15 @@ body.header-compact .settings-pop {
 }
 
 .users-link-url {
-  flex: 1;
+  flex: 1 1 100%;
   min-width: 0;
   font-size: 12px;
+}
+
+.users-link-buttons {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
 }
 
 .users-link button {
@@ -896,6 +902,12 @@ body.header-compact .settings-pop {
   border-radius: 8px;
   font-size: 12px;
   font-weight: 700;
+}
+
+.users-link button.ghost {
+  color: #cfe3d8;
+  background: #16201a;
+  border: 1px solid #2f5a41;
 }
 
 .users-message {

@@ -493,6 +493,10 @@ body.view-mobile .arrival-toast {
 
   .users-link button { min-height: 40px; }
 
+  .users-link-buttons { width: 100%; margin-left: 0; }
+
+  .users-link-buttons button { flex: 1; }
+
   .users-actions { width: 100%; }
 
   .users-actions button {

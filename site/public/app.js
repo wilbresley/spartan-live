@@ -49,8 +49,11 @@ import {
   viewModeLabel,
 } from "./view-mode.mjs";
 import {
+  MESSAGE_INVITE,
+  MESSAGE_RESET,
   ROLE_ADMIN,
   accountLink,
+  accountMessage,
   deleteBlocked,
   nameProblem,
   normalizeName,
@@ -2964,12 +2967,14 @@ const usersLinkBox = document.querySelector("#users-link");
 const usersLinkFor = document.querySelector("#users-link-for");
 const usersLinkUrl = document.querySelector("#users-link-url");
 const usersLinkCopy = document.querySelector("#users-link-copy");
+const usersLinkMessage = document.querySelector("#users-link-message");
 const usersClose = document.querySelector("#users-close");
 let usersCache = [];
 let usersMe = "";
 let usersArmed = "";
 let usersArmTimer = 0;
 let usersCopyTimer = 0;
+let usersLinkText = "";
 
 function sayUsers(text) {
   if (!usersMessage) return;
@@ -2977,16 +2982,21 @@ function sayUsers(text) {
   usersMessage.classList.toggle("hidden", !text);
 }
 
-function showUsersLink(name, path) {
+function showUsersLink(name, path, kind = MESSAGE_INVITE) {
   const url = accountLink(location.origin, path);
   if (!usersLinkBox || !usersLinkUrl || !usersLinkFor || !url) {
     sayUsers("Não consegui montar o link dessa conta. Gere outro.");
     return;
   }
-  usersLinkFor.textContent = `Link de primeiro acesso de ${name} (vale 7 dias e só abre uma vez)`;
+  usersLinkFor.textContent = kind === MESSAGE_RESET
+    ? `Senha nova de ${name} (vale 7 dias e só abre uma vez)`
+    : `Link de primeiro acesso de ${name} (vale 7 dias e só abre uma vez)`;
   usersLinkUrl.value = url;
+  usersLinkText = accountMessage(kind, { name, link: url, site: location.origin });
+  usersLinkMessage?.classList.toggle("hidden", !usersLinkText);
   usersLinkBox.classList.remove("hidden");
-  if (usersLinkCopy) usersLinkCopy.textContent = "Copiar";
+  if (usersLinkCopy) usersLinkCopy.textContent = "Copiar link";
+  if (usersLinkMessage) usersLinkMessage.textContent = "Copiar mensagem";
   usersLinkUrl.select?.();
 }
 
@@ -3044,6 +3054,7 @@ async function openUsers() {
   usersArmed = "";
   window.clearTimeout(usersArmTimer);
   sayUsers("");
+  usersLinkText = "";
   usersLinkBox?.classList.add("hidden");
   usersPop.classList.remove("hidden");
   try {
@@ -3066,7 +3077,7 @@ async function resetAccount(name) {
     usersArmed = "";
     window.clearTimeout(usersArmTimer);
     await loadUsers();
-    showUsersLink(name, data.path);
+    showUsersLink(name, data.path, MESSAGE_RESET);
     sayUsers(`Link novo de ${name}. Vale 7 dias e só abre uma vez.`);
   } catch (error) {
     sayUsers(error.message || "Não consegui gerar o link.");
@@ -3126,20 +3137,53 @@ usersForm?.addEventListener("submit", async (event) => {
   }
 });
 
+// Copia texto com a área de transferência nova e, se ela não existir (HTTP, navegador
+// antigo), com o textarea escondido. Devolve se deu certo.
+async function copyText(text) {
+  if (!text) return false;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch { /* cai no textarea */ }
+  try {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.append(area);
+    area.select();
+    const ok = document.execCommand("copy");
+    area.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+function flashUsersCopy(button, label) {
+  if (!button) return;
+  button.textContent = label;
+  window.clearTimeout(usersCopyTimer);
+  usersCopyTimer = window.setTimeout(() => {
+    if (usersLinkCopy) usersLinkCopy.textContent = "Copiar link";
+    if (usersLinkMessage) usersLinkMessage.textContent = "Copiar mensagem";
+  }, 2000);
+}
+
 usersLinkCopy?.addEventListener("click", async () => {
   const url = usersLinkUrl?.value || "";
   if (!url) return;
-  try {
-    await navigator.clipboard.writeText(url);
-  } catch {
-    usersLinkUrl.select();
-    document.execCommand("copy");
-  }
-  usersLinkCopy.textContent = "Copiado";
-  window.clearTimeout(usersCopyTimer);
-  usersCopyTimer = window.setTimeout(() => {
-    if (usersLinkCopy) usersLinkCopy.textContent = "Copiar";
-  }, 2000);
+  if (await copyText(url)) flashUsersCopy(usersLinkCopy, "Link copiado");
+  else sayUsers("Não consegui copiar o link. Selecione o campo e copie à mão.");
+});
+
+usersLinkMessage?.addEventListener("click", async () => {
+  if (!usersLinkText) return;
+  if (await copyText(usersLinkText)) flashUsersCopy(usersLinkMessage, "Mensagem copiada");
+  else sayUsers("Não consegui copiar a mensagem. Copie o link e mande com suas palavras.");
 });
 
 document.querySelector("#m-set-users")?.addEventListener("click", openUsers);
